@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Futures Signal Pro</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+<style>
+:root {
+  --bg:#0a0c10;--bg2:#0f1218;--bg3:#151a22;--bg4:#1c2330;
+  --br:#1e2736;--br2:#263040;
+  --tx:#e8edf5;--tx2:#8a95a8;--tx3:#4a5568;
+  --g:#00e096;--gd:#00e09618;--gb:#00e09640;
+  --r:#ff4757;--rd:#ff475718;--rb:#ff475740;
+  --y:#ffd32a;--yd:#ffd32a18;
+  --b:#3d8ef0;--bd:#3d8ef018;
+  --ac:#5b6af0;--acd:#5b6af015;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.5}
+
+.layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+
+/* Sidebar */
+.sidebar{background:var(--bg2);border-right:1px solid var(--br);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+.logo{padding:18px 20px;border-bottom:1px solid var(--br)}
+.logo-mark{font-family:'Syne',sans-serif;font-weight:800;font-size:16px;letter-spacing:-0.02em}
+.logo-sub{font-size:10px;color:var(--tx3);margin-top:2px;letter-spacing:.1em}
+.nav{padding:10px 8px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:6px;color:var(--tx2);cursor:pointer;transition:all .15s;margin-bottom:2px;font-size:12px}
+.nav-item:hover{background:var(--bg3);color:var(--tx)}
+.nav-item.active{background:var(--acd);color:var(--ac);border:1px solid #5b6af030}
+.sb-label{font-size:10px;color:var(--tx3);letter-spacing:.12em;padding:10px 20px 5px}
+.pair-item{display:flex;align-items:center;justify-content:space-between;padding:6px 20px;cursor:pointer;transition:background .1s;font-size:12px}
+.pair-item:hover{background:var(--bg3)}
+.pair-item.active-pair{background:var(--bg4)}
+
+/* Topbar */
+.topbar{padding:14px 24px;border-bottom:1px solid var(--br);display:flex;align-items:center;justify-content:space-between;background:var(--bg);position:sticky;top:0;z-index:10;gap:12px;flex-wrap:wrap}
+.topbar-l{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.page-title{font-family:'Syne',sans-serif;font-size:15px;font-weight:700;white-space:nowrap}
+.iv-tabs{display:flex;gap:3px}
+.tab{padding:5px 11px;border-radius:5px;border:1px solid var(--br);background:transparent;color:var(--tx2);cursor:pointer;font-family:'JetBrains Mono';font-size:11px;transition:all .15s}
+.tab:hover{border-color:var(--br2);color:var(--tx)}
+.tab.active{background:var(--bg3);border-color:var(--br2);color:var(--tx)}
+.scan-btn{padding:7px 18px;background:var(--ac);border:none;border-radius:6px;color:#fff;font-family:'JetBrains Mono';font-size:12px;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.scan-btn:hover{opacity:.85}
+.scan-btn:disabled{opacity:.45;cursor:not-allowed}
+.sdot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle}
+.sdot.live{background:var(--g);animation:pulse 2s infinite}
+.sdot.loading{background:var(--y)}
+.sdot.error{background:var(--r)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Content */
+.content{padding:20px}
+
+/* Metrics row */
+.metrics-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:20px}
+.mc{background:var(--bg2);border:1px solid var(--br);border-radius:10px;padding:14px 16px}
+.ml{font-size:10px;color:var(--tx3);letter-spacing:.1em;margin-bottom:6px}
+.mv{font-size:20px;font-weight:500}
+.ms{font-size:11px;color:var(--tx3);margin-top:3px}
+.up{color:var(--g)}.dn{color:var(--r)}.neu{color:var(--y)}
+
+/* Two col */
+.two-col{display:grid;grid-template-columns:1fr 320px;gap:14px;margin-bottom:20px}
+.card{background:var(--bg2);border:1px solid var(--br);border-radius:10px;overflow:hidden}
+.card-hd{padding:12px 16px;border-bottom:1px solid var(--br);display:flex;align-items:center;justify-content:space-between}
+.ct{font-size:11px;color:var(--tx2);letter-spacing:.08em}
+.card-body{padding:16px}
+.chart-wrap{position:relative;height:210px}
+
+/* Signal card */
+.sig-main{padding:18px 16px;text-align:center;border-bottom:1px solid var(--br)}
+.sig-lbl{font-size:10px;color:var(--tx3);letter-spacing:.12em;margin-bottom:6px}
+.sig-txt{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;margin-bottom:5px}
+.sig-sub{font-size:11px;color:var(--tx2)}
+.cbar{height:3px;background:var(--bg4);border-radius:2px;margin-top:10px;overflow:hidden}
+.cfill{height:100%;border-radius:2px;transition:width .5s}
+.lvl-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--br)}
+.lv{background:var(--bg2);padding:10px 14px}
+.lv-lbl{font-size:10px;color:var(--tx3);margin-bottom:3px}
+.lv-val{font-size:12px;font-weight:500}
+.reasons-box{padding:12px 16px;border-top:1px solid var(--br)}
+.reason{display:flex;gap:7px;font-size:11px;color:var(--tx2);padding:3px 0}
+
+/* Indicators */
+.ind-row{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:20px}
+.ind-card{background:var(--bg2);border:1px solid var(--br);border-radius:10px;padding:12px 14px}
+.ind-n{font-size:10px;color:var(--tx3);letter-spacing:.1em;margin-bottom:8px}
+.ind-v{font-size:17px;font-weight:500;margin-bottom:6px}
+.ibar{height:3px;background:var(--bg4);border-radius:2px;overflow:hidden}
+.ifill{height:100%;border-radius:2px;transition:width .5s}
+.ind-h{font-size:10px;color:var(--tx3);margin-top:5px}
+
+/* Scanner */
+.sc-card{background:var(--bg2);border:1px solid var(--br);border-radius:10px;overflow:hidden}
+.sc-hd{padding:12px 16px;border-bottom:1px solid var(--br);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.filters{display:flex;gap:6px;flex-wrap:wrap}
+.f-btn{padding:4px 10px;border-radius:4px;border:1px solid var(--br);background:transparent;color:var(--tx2);font-size:11px;font-family:'JetBrains Mono';cursor:pointer;transition:all .15s}
+.f-btn:hover,.f-btn.active{background:var(--bg3);color:var(--tx);border-color:var(--br2)}
+.th{display:grid;grid-template-columns:130px 110px 75px 65px 65px 80px 85px 100px 115px;padding:9px 16px;background:var(--bg3);font-size:10px;color:var(--tx3);letter-spacing:.08em;border-bottom:1px solid var(--br);gap:6px;min-width:800px}
+.tr{display:grid;grid-template-columns:130px 110px 75px 65px 65px 80px 85px 100px 115px;padding:10px 16px;border-bottom:1px solid var(--br);gap:6px;align-items:center;cursor:pointer;transition:background .1s;min-width:800px}
+.tr:hover{background:var(--bg3)}
+.tr:last-child{border-bottom:none}
+.sc-overflow{overflow-x:auto}
+
+/* Pills */
+.pill{display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.05em;white-space:nowrap}
+.pill.strong-long{background:#00e09625;color:var(--g);border:1px solid var(--gb)}
+.pill.long{background:#00e09612;color:#00cc80;border:1px solid #00e09630}
+.pill.weaklong{background:var(--yd);color:var(--y);border:1px solid #ffd32a35}
+.pill.neutral{background:var(--bg4);color:var(--tx3);border:1px solid var(--br)}
+.pill.weakshort{background:#ff475712;color:#ff7080;border:1px solid #ff475730}
+.pill.short{background:var(--rd);color:var(--r);border:1px solid var(--rb)}
+.pill.strong-short{background:#ff475728;color:var(--r);border:1px solid var(--rb)}
+
+/* Score bar */
+.sbar{display:flex;align-items:center;gap:5px}
+.snum{font-size:12px;font-weight:500;min-width:22px}
+.mbar{height:4px;flex:1;background:var(--bg4);border-radius:2px;overflow:hidden}
+.mfill{height:100%;border-radius:2px}
+
+/* Loading */
+.ld{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:50px 20px;color:var(--tx3);gap:10px}
+.sp{width:18px;height:18px;border:2px solid var(--br);border-top-color:var(--ac);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Funding */
+.fr-row{display:grid;grid-template-columns:1fr 110px 110px 1fr;padding:10px 16px;border-bottom:1px solid var(--br);font-size:12px;align-items:center;gap:8px;cursor:pointer;transition:background .1s}
+.fr-row:hover{background:var(--bg3)}
+
+/* Opportunities */
+.opp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+.opp-card{background:var(--bg2);border:1px solid var(--br);border-radius:10px;overflow:hidden;cursor:pointer;transition:border-color .15s}
+.opp-card:hover{border-color:var(--br2)}
+.opp-hd{padding:12px 16px;border-bottom:1px solid var(--br);display:flex;align-items:center;justify-content:space-between}
+.opp-body{padding:14px 16px}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:var(--bg2)}
+::-webkit-scrollbar-thumb{background:var(--br2);border-radius:2px}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- ── Sidebar ── -->
+<aside class="sidebar">
+  <div class="logo">
+    <div class="logo-mark">⬡ SIGNAL PRO</div>
+    <div class="logo-sub">BINANCE FUTURES</div>
+  </div>
+  <nav class="nav">
+    <div class="nav-item active" id="nav-scanner" onclick="showView('scanner')">
+      <span>◈</span> Scanner
+    </div>
+    <div class="nav-item" id="nav-opportunities" onclick="showView('opportunities')">
+      <span>◉</span> Opportunities
+    </div>
+    <div class="nav-item" id="nav-funding" onclick="showView('funding')">
+      <span>◎</span> Funding Rates
+    </div>
+  </nav>
+  <div class="sb-label">TOP SIGNALS</div>
+  <div id="sb-pairs"></div>
+</aside>
+
+<!-- ── Main ── -->
+<main>
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="topbar-l">
+      <div class="page-title" id="page-title">Market Scanner</div>
+      <div class="iv-tabs">
+        <button class="tab" onclick="setIv('15m')">15m</button>
+        <button class="tab active" onclick="setIv('1h')">1h</button>
+        <button class="tab" onclick="setIv('4h')">4h</button>
+        <button class="tab" onclick="setIv('1d')">1d</button>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px">
+      <span style="font-size:11px;color:var(--tx3)">
+        <span class="sdot" id="sdot"></span>
+        <span id="slabel">Siap</span>
+      </span>
+      <button class="scan-btn" id="scan-btn" onclick="runScan()">⟳ SCAN SEMUA</button>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div class="content">
+
+    <!-- ── SCANNER VIEW ── -->
+    <div id="view-scanner">
+      <!-- Detail pair -->
+      <div id="detail" style="display:none;margin-bottom:20px">
+        <div class="metrics-row" id="det-metrics"></div>
+        <div class="two-col">
+          <div class="card">
+            <div class="card-hd">
+              <span class="ct" id="chart-title">CHART</span>
+              <span style="font-size:11px;color:var(--tx3)" id="chart-info"></span>
+            </div>
+            <div class="card-body">
+              <div class="chart-wrap"><canvas id="pChart"></canvas></div>
+            </div>
+          </div>
+          <div class="card" id="sig-card"></div>
+        </div>
+        <div class="ind-row" id="ind-row"></div>
+      </div>
+
+      <!-- Scanner table -->
+      <div class="sc-card">
+        <div class="sc-hd">
+          <span class="ct">MARKET SCANNER — <span id="pcnt" style="color:var(--tx)">—</span> PAIRS &nbsp;<span id="fail-info" style="color:var(--r);font-size:10px"></span></span>
+          <div class="filters">
+            <button class="f-btn active" onclick="setFilter('all',this)">Semua</button>
+            <button class="f-btn" onclick="setFilter('long',this)">Long ▲</button>
+            <button class="f-btn" onclick="setFilter('short',this)">Short ▼</button>
+            <button class="f-btn" onclick="setFilter('strong',this)">Strong Only</button>
+            <button class="f-btn" onclick="setFilter('neutral',this)">Netral</button>
+          </div>
+        </div>
+        <div class="sc-overflow">
+          <div class="th">
+            <span>PAIR</span><span>HARGA</span><span>24H %</span>
+            <span>RSI</span><span>StochK</span><span>FUNDING</span>
+            <span>SCORE</span><span>CONF%</span><span>SIGNAL</span>
+          </div>
+          <div id="sc-body"><div class="ld"><span>Klik <strong>SCAN SEMUA</strong> untuk mulai</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── OPPORTUNITIES VIEW ── -->
+    <div id="view-opportunities" style="display:none">
+      <div id="opp-body"><div class="ld"><span>Jalankan scan terlebih dahulu</span></div></div>
+    </div>
+
+    <!-- ── FUNDING VIEW ── -->
+    <div id="view-funding" style="display:none">
+      <div class="sc-card">
+        <div class="sc-hd"><span class="ct">FUNDING RATES — UPDATE SETIAP 8 JAM</span></div>
+        <div class="fr-row" style="background:var(--bg3);font-size:10px;color:var(--tx3);letter-spacing:.08em;cursor:default">
+          <span>PAIR</span><span>MARK PRICE</span><span>FUNDING RATE</span><span>INTERPRETASI</span>
+        </div>
+        <div id="fr-body"><div class="ld"><div class="sp"></div><span>Memuat...</span></div></div>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</main>
+</div>
+
+<script>
+const API = 'http://localhost:3000/api';
+let curIv = '1h';
+let curFilter = 'all';
+let scanData = [];
+let pChart = null;
+let selPair = null;
+
+// ─── View ─────────────────────────────────────────────────────────────────────
+function showView(v) {
+  ['scanner','opportunities','funding'].forEach(x => {
+    document.getElementById('view-'+x).style.display = x===v?'block':'none';
+    document.getElementById('nav-'+x).classList.toggle('active', x===v);
+  });
+  const titles = {scanner:'Market Scanner',opportunities:'Top Opportunities',funding:'Funding Rates'};
+  document.getElementById('page-title').textContent = titles[v];
+  if (v==='funding') loadFunding();
+  if (v==='opportunities') renderOpportunities();
+}
+
+// ─── Interval ─────────────────────────────────────────────────────────────────
+function setIv(iv) {
+  curIv = iv;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.textContent===iv));
+}
+
+// ─── Filter ───────────────────────────────────────────────────────────────────
+function setFilter(f, el) {
+  curFilter = f;
+  document.querySelectorAll('.f-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  renderScanner(scanData);
+}
+
+// ─── Status ───────────────────────────────────────────────────────────────────
+function setStatus(state, txt) {
+  document.getElementById('sdot').className = 'sdot ' + state;
+  document.getElementById('slabel').textContent = txt;
+}
+
+// ─── Scan ─────────────────────────────────────────────────────────────────────
+async function runScan() {
+  const btn = document.getElementById('scan-btn');
+  btn.disabled = true;
+  btn.textContent = '⟳ Scanning...';
+  setStatus('loading','Scanning...');
+  document.getElementById('sc-body').innerHTML = `<div class="ld"><div class="sp"></div><span>Mengambil data ${curIv} dari Binance... (20-30 detik)</span></div>`;
+
+  try {
+    const res = await fetch(`${API}/scanner?interval=${curIv}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+
+    // Handle response
+    scanData = json.data || [];
+    document.getElementById('pcnt').textContent = scanData.length;
+
+    const failInfo = json.failed > 0
+      ? `${json.failed} pair gagal`
+      : '';
+    document.getElementById('fail-info').textContent = failInfo;
+
+    renderScanner(scanData);
+    renderSidebar(scanData);
+    setStatus('live', `Updated ${new Date().toLocaleTimeString('id-ID')}`);
+  } catch(e) {
+    setStatus('error','Error');
+    document.getElementById('sc-body').innerHTML = `
+      <div class="ld" style="color:var(--r)">
+        ⚠ Gagal terhubung ke backend<br>
+        <span style="color:var(--tx3);font-size:11px;margin-top:6px">${e.message}<br><br>
+        Pastikan: <strong>npm start</strong> berjalan di folder backend<br>
+        Server harus aktif di port 3000</span>
+      </div>`;
+  }
+
+  btn.disabled = false;
+  btn.textContent = '⟳ SCAN SEMUA';
+}
+
+// ─── Render Scanner ───────────────────────────────────────────────────────────
+function renderScanner(data) {
+  let fd = [...data];
+
+  if (curFilter === 'long')    fd = fd.filter(d => d.signal?.score > 0);
+  else if (curFilter === 'short')   fd = fd.filter(d => d.signal?.score < 0);
+  else if (curFilter === 'strong')  fd = fd.filter(d => Math.abs(d.signal?.score||0) >= 7);
+  else if (curFilter === 'neutral') fd = fd.filter(d => Math.abs(d.signal?.score||0) < 2);
+
+  if (fd.length === 0) {
+    document.getElementById('sc-body').innerHTML = `
+      <div class="ld">Tidak ada data untuk filter ini<br>
+      <span style="font-size:11px;color:var(--tx3)">Coba filter "Semua" atau jalankan scan lagi</span></div>`;
+    return;
+  }
+
+  document.getElementById('sc-body').innerHTML = fd.map(d => {
+    const sig   = d.signal || {};
+    const score = sig.score || 0;
+    const str   = sig.strength || 'neutral';
+    const conf  = sig.confidence || 50;
+    const chg   = d.priceChangePercent || 0;
+    const rsi   = d.indicators?.rsi || d.rsi || 0;
+    const stk   = d.stochK || d.indicators?.stochRSI?.k || 0;
+    const fr    = d.fundingRate || 0;
+
+    const chgCls  = chg >= 0 ? 'up' : 'dn';
+    const rsiCol  = rsi < 40 ? 'var(--g)' : rsi > 70 ? 'var(--r)' : 'var(--tx)';
+    const frCls   = fr < 0 ? 'up' : fr > 0.05 ? 'dn' : 'neu';
+    const scCol   = score > 0 ? 'var(--g)' : score < 0 ? 'var(--r)' : 'var(--tx3)';
+    const scPct   = Math.min(100, Math.abs(score)/13*100);
+    const confCol = conf >= 70 ? 'var(--g)' : conf >= 50 ? 'var(--y)' : 'var(--tx3)';
+    const prStr   = fmtP(d.price);
+
+    return `<div class="tr" onclick="loadDetail('${d.symbol}')">
+      <span style="font-weight:500">${d.symbol.replace('USDT','/USDT')}</span>
+      <span>$${prStr}</span>
+      <span class="${chgCls}">${chg >= 0?'+':''}${chg.toFixed(2)}%</span>
+      <span style="color:${rsiCol}">${rsi}</span>
+      <span style="color:var(--tx2)">${stk.toFixed(1)}</span>
+      <span class="${frCls}">${fr.toFixed(4)}%</span>
+      <div class="sbar">
+        <span class="snum" style="color:${scCol}">${score>0?'+':''}${score}</span>
+        <div class="mbar"><div class="mfill" style="width:${scPct}%;background:${scCol}"></div></div>
+      </div>
+      <span style="color:${confCol}">${conf}%</span>
+      <span><span class="pill ${str}">${sig.signal||'—'}</span></span>
+    </div>`;
+  }).join('');
+}
+
+// ─── Load Detail ──────────────────────────────────────────────────────────────
+async function loadDetail(sym) {
+  selPair = sym;
+  document.getElementById('detail').style.display = 'block';
+  document.getElementById('det-metrics').innerHTML = `<div class="ld" style="grid-column:1/-1;padding:16px"><div class="sp"></div></div>`;
+
+  try {
+    const res = await fetch(`${API}/analyze/${sym}?interval=${curIv}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    renderDetail(d);
+    window.scrollTo({top:0,behavior:'smooth'});
+  } catch(e) {
+    document.getElementById('det-metrics').innerHTML =
+      `<div style="color:var(--r);grid-column:1/-1;padding:16px">⚠ Gagal memuat detail: ${e.message}</div>`;
+  }
+}
+
+// ─── Render Detail ────────────────────────────────────────────────────────────
+function renderDetail(d) {
+  const sig  = d.signal || {};
+  const ind  = d.indicators || {};
+  const pr   = d.price || 0;
+  const chg  = d.priceChangePercent || 0;
+  const fr   = d.fundingRate || 0;
+  const oi   = d.openInterest;
+  const qv   = d.quoteVolume || 0;
+  const chgC = chg >= 0 ? 'up' : 'dn';
+
+  // Metrics
+  document.getElementById('det-metrics').innerHTML = `
+    <div class="mc">
+      <div class="ml">HARGA</div>
+      <div class="mv">$${fmtP(pr)}</div>
+      <div class="ms ${chgC}">${chg>=0?'+':''}${chg.toFixed(2)}% 24h</div>
+    </div>
+    <div class="mc">
+      <div class="ml">VOLUME 24H</div>
+      <div class="mv">${(qv/1e6).toFixed(1)}M</div>
+      <div class="ms">USDT</div>
+    </div>
+    <div class="mc">
+      <div class="ml">FUNDING RATE</div>
+      <div class="mv ${fr<0?'up':fr>0.05?'dn':'neu'}">${fr.toFixed(4)}%</div>
+      <div class="ms">setiap 8 jam</div>
+    </div>
+    <div class="mc">
+      <div class="ml">OPEN INTEREST</div>
+      <div class="mv">${oi ? (oi/1e6).toFixed(2)+'M' : '—'}</div>
+      <div class="ms">${d.symbol?.replace('USDT','')}</div>
+    </div>`;
+
+  // Chart
+  document.getElementById('chart-title').textContent = (d.symbol||'').replace('USDT','/USDT') + ' · ' + curIv;
+  document.getElementById('chart-info').textContent = (d.klines?.length||0) + ' candles';
+  if (d.klines?.length) renderChart(d.klines, ind);
+
+  // Signal card
+  const score   = sig.score || 0;
+  const sigCol  = score > 0 ? 'var(--g)' : score < 0 ? 'var(--r)' : 'var(--y)';
+  const conf    = sig.confidence || 50;
+  const confCol = conf >= 70 ? 'var(--g)' : conf >= 50 ? 'var(--y)' : 'var(--r)';
+  const lvl     = sig.levels || {};
+
+  document.getElementById('sig-card').innerHTML = `
+    <div class="sig-main">
+      <div class="sig-lbl">SIGNAL ${curIv.toUpperCase()}</div>
+      <div class="sig-txt" style="color:${sigCol}">${sig.signal||'—'}</div>
+      <div class="sig-sub">Score: ${score>0?'+':''}${score} &nbsp;·&nbsp; Confidence: ${conf}%</div>
+      <div class="cbar"><div class="cfill" style="width:${conf}%;background:${confCol}"></div></div>
+    </div>
+    <div class="lvl-grid">
+      <div class="lv"><div class="lv-lbl">ENTRY</div><div class="lv-val">$${fmtP(lvl.entry)}</div></div>
+      <div class="lv"><div class="lv-lbl">STOP LOSS</div><div class="lv-val" style="color:var(--r)">$${fmtP(lvl.sl)}</div></div>
+      <div class="lv"><div class="lv-lbl">TP 1</div><div class="lv-val" style="color:var(--g)">$${fmtP(lvl.tp1)}</div></div>
+      <div class="lv"><div class="lv-lbl">TP 2</div><div class="lv-val" style="color:var(--g)">$${fmtP(lvl.tp2)}</div></div>
+      <div class="lv"><div class="lv-lbl">TP 3</div><div class="lv-val" style="color:var(--g)">$${fmtP(lvl.tp3)}</div></div>
+      <div class="lv"><div class="lv-lbl">R:R RATIO</div><div class="lv-val" style="color:var(--ac)">${lvl.rr||0}:1</div></div>
+    </div>
+    <div class="reasons-box">
+      <div style="font-size:10px;color:var(--tx3);margin-bottom:6px;letter-spacing:.08em">ALASAN SIGNAL</div>
+      ${(sig.reasons||[]).map(r=>`<div class="reason"><span style="color:var(--ac)">›</span>${r}</div>`).join('')}
+    </div>`;
+
+  // Indicators
+  const rsi = ind.rsi || 0;
+  const macd = ind.macd || {};
+  const stoch = ind.stochRSI || {};
+  const bb = ind.bb || {};
+  const ema20 = ind.ema20 || 0, ema50 = ind.ema50 || 0;
+
+  document.getElementById('ind-row').innerHTML = [
+    { n:'RSI (14)', v:rsi, pct:rsi,
+      c:rsi<40?'var(--g)':rsi>70?'var(--r)':'var(--b)',
+      h:rsi<30?'Oversold kuat':rsi>70?'Overbought kuat':rsi<50?'Bearish bias':'Bullish bias' },
+    { n:'MACD HISTOGRAM', v:(macd.histogram>0?'+':'')+((macd.histogram||0).toFixed(5)),
+      pct:50+(macd.histogram>0?25:-25),
+      c:macd.histogram>0?'var(--g)':'var(--r)',
+      h:macd.histogram>0?'Momentum bullish':'Momentum bearish' },
+    { n:'STOCH RSI K', v:(stoch.k||50).toFixed(1), pct:stoch.k||50,
+      c:(stoch.k||50)<20?'var(--g)':(stoch.k||50)>80?'var(--r)':'var(--b)',
+      h:(stoch.k||50)<20?'Oversold':(stoch.k||50)>80?'Overbought':'Normal' },
+    { n:'BB WIDTH', v:(bb.width||0)+'%', pct:Math.min(100,(bb.width||0)*4),
+      c:'var(--ac)', h:(bb.width||0)<5?'Squeeze — waspadai breakout':'Volatilitas normal' },
+    { n:'EMA TREND', v:ema20>ema50?'BULLISH':'BEARISH', pct:ema20>ema50?70:30,
+      c:ema20>ema50?'var(--g)':'var(--r)',
+      h:`EMA20: $${fmtP(ema20)} · EMA50: $${fmtP(ema50)}` },
+  ].map(i=>`
+    <div class="ind-card">
+      <div class="ind-n">${i.n}</div>
+      <div class="ind-v" style="color:${i.c}">${i.v}</div>
+      <div class="ibar"><div class="ifill" style="width:${i.pct}%;background:${i.c}"></div></div>
+      <div class="ind-h">${i.h}</div>
+    </div>`).join('');
+}
+
+// ─── Chart ────────────────────────────────────────────────────────────────────
+function feEMA(closes, period) {
+  if (closes.length < period) return null;
+  const k = 2/(period+1);
+  let ema = closes.slice(0,period).reduce((a,b)=>a+b,0)/period;
+  for (let i=period;i<closes.length;i++) ema=closes[i]*k+ema*(1-k);
+  return ema;
+}
+
+function renderChart(klines, ind) {
+  if (pChart) { pChart.destroy(); pChart=null; }
+  const ctx = document.getElementById('pChart');
+  const closes = klines.map(k=>k.close);
+  const labels = klines.map(k=>new Date(k.time).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}));
+  const ema20v = closes.map((_,i)=>i>=19?feEMA(closes.slice(0,i+1),20):null);
+  const ema50v = closes.map((_,i)=>i>=49?feEMA(closes.slice(0,i+1),50):null);
+
+  pChart = new Chart(ctx, {
+    type:'line',
+    data:{labels,datasets:[
+      {label:'Harga',data:closes,borderColor:'#e8edf5',borderWidth:1.5,pointRadius:0,fill:false,tension:0.1},
+      {label:'EMA20',data:ema20v,borderColor:'#3d8ef0',borderWidth:1,pointRadius:0,fill:false,tension:0.1,spanGaps:true},
+      {label:'EMA50',data:ema50v,borderColor:'#ffd32a',borderWidth:1,pointRadius:0,fill:false,tension:0.1,spanGaps:true},
+    ]},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},
+      scales:{
+        x:{ticks:{color:'#4a5568',maxRotation:0,maxTicksLimit:8,font:{size:10}},grid:{color:'#1e2736'}},
+        y:{ticks:{color:'#4a5568',font:{size:10},callback:v=>v>100?'$'+v.toLocaleString('id-ID',{maximumFractionDigits:0}):'$'+v.toFixed(4)},grid:{color:'#1e2736'}},
+      }
+    }
+  });
+}
+
+// ─── Opportunities ────────────────────────────────────────────────────────────
+function renderOpportunities() {
+  if (!scanData.length) {
+    document.getElementById('opp-body').innerHTML = `<div class="ld">Jalankan scan terlebih dahulu</div>`;
+    return;
+  }
+  const top = scanData
+    .filter(d => ['STRONG LONG','LONG','STRONG SHORT','SHORT'].includes(d.signal?.signal))
+    .slice(0, 9);
+
+  if (!top.length) {
+    document.getElementById('opp-body').innerHTML = `<div class="ld">Tidak ada signal kuat saat ini</div>`;
+    return;
+  }
+
+  document.getElementById('opp-body').innerHTML = `<div class="opp-grid">` + top.map(d=>{
+    const sig = d.signal||{};
+    const lvl = sig.levels||{};
+    const scCol = sig.score>0?'var(--g)':'var(--r)';
+    const confCol = sig.confidence>=70?'var(--g)':sig.confidence>=50?'var(--y)':'var(--r)';
+    return `<div class="opp-card" onclick="loadDetail('${d.symbol}');showView('scanner')">
+      <div class="opp-hd">
+        <span style="font-weight:600">${d.symbol.replace('USDT','/USDT')}</span>
+        <span class="pill ${sig.strength||'neutral'}">${sig.signal||'—'}</span>
+      </div>
+      <div class="opp-body">
+        <div style="display:flex;justify-content:space-between;margin-bottom:12px">
+          <div>
+            <div class="ml">HARGA</div>
+            <div style="font-size:17px;font-weight:500">$${fmtP(d.price)}</div>
+          </div>
+          <div style="text-align:right">
+            <div class="ml">CONFIDENCE</div>
+            <div style="font-size:17px;font-weight:500;color:${confCol}">${sig.confidence||0}%</div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+          <div><div class="ml">TP1</div><div style="color:var(--g);font-size:11px">$${fmtP(lvl.tp1)}</div></div>
+          <div><div class="ml">TP2</div><div style="color:var(--g);font-size:11px">$${fmtP(lvl.tp2)}</div></div>
+          <div><div class="ml">SL</div><div style="color:var(--r);font-size:11px">$${fmtP(lvl.sl)}</div></div>
+        </div>
+        <div style="font-size:10px;color:var(--tx3);line-height:1.6">
+          ${(sig.reasons||[]).slice(0,3).map(r=>'· '+r).join('<br>')}
+        </div>
+      </div>
+    </div>`;
+  }).join('') + `</div>`;
+}
+
+// ─── Funding ──────────────────────────────────────────────────────────────────
+async function loadFunding() {
+  document.getElementById('fr-body').innerHTML = `<div class="ld"><div class="sp"></div><span>Memuat...</span></div>`;
+  try {
+    const res = await fetch(`${API}/funding`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    document.getElementById('fr-body').innerHTML = data.map(d=>{
+      const frC = d.fundingRate<0?'up':d.fundingRate>0.05?'dn':'neu';
+      const interp = d.fundingRate<-0.05?'🟢 Peluang SHORT SQUEEZE':
+                     d.fundingRate<0?'🟡 Funding negatif — bullish bias':
+                     d.fundingRate>0.1?'🔴 Longs overlevered — hati-hati':
+                     d.fundingRate>0.05?'🟠 Funding tinggi':
+                     '⚪ Normal';
+      return `<div class="fr-row" onclick="loadDetail('${d.symbol}');showView('scanner')">
+        <span style="font-weight:500">${d.symbol.replace('USDT','/USDT')}</span>
+        <span>$${fmtP(d.markPrice)}</span>
+        <span class="${frC}">${d.fundingRate.toFixed(4)}%</span>
+        <span style="font-size:11px">${interp}</span>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('fr-body').innerHTML = `<div class="ld" style="color:var(--r)">Error: ${e.message}</div>`;
+  }
+}
+
+// ─── Sidebar ──────────────────────────────────────────────────────────────────
+function renderSidebar(data) {
+  const top = data.slice(0, 12);
+  document.getElementById('sb-pairs').innerHTML = top.map(d=>{
+    const sig = d.signal||{};
+    const str = sig.strength||'neutral';
+    const short = {
+      'strong-long':'SL','long':'L','weaklong':'WL',
+      'neutral':'N','weakshort':'WS','short':'S','strong-short':'SS'
+    }[str]||'N';
+    return `<div class="pair-item ${selPair===d.symbol?'active-pair':''}" onclick="loadDetail('${d.symbol}');showView('scanner')">
+      <span>${d.symbol.replace('USDT','')}</span>
+      <span class="pill ${str}" style="font-size:9px">${short}</span>
+    </div>`;
+  }).join('');
+}
+
+// ─── Utils ────────────────────────────────────────────────────────────────────
+function fmtP(n) {
+  if (n == null || isNaN(n)) return '—';
+  return n > 100
+    ? n.toLocaleString('id-ID',{maximumFractionDigits:2})
+    : n.toFixed(4);
+}
+</script>
+</body>
+</html>
