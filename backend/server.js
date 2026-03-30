@@ -13,8 +13,9 @@ const cron = require('node-cron');
 dotenv.config();
 
 const app = express();
-const PORT = Number(process.env.ALWAYSDATA_HTTPD_PORT || process.env.PORT) || 3000;
-const HOST = process.env.ALWAYSDATA_HTTPD_IP || '0.0.0.0';
+const PORT = Number(process.env.PORT) || 3000;
+// Alwaysdata Nginx reverse proxy mengirimkan IPv6 lewat process.env.IP 
+const HOST = process.env.IP || '::';
 const DEFAULT_BINANCE_BASE_URL = 'https://fapi.binance.com';
 const REQUEST_TIMEOUT_MS = Number(process.env.BINANCE_TIMEOUT_MS) || 15000;
 
