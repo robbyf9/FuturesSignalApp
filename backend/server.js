@@ -9,6 +9,7 @@ const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
 const cron = require('node-cron');
+const fs = require('fs');
 
 dotenv.config();
 
@@ -137,7 +138,7 @@ const WATCHLIST = [
   'AVAXUSDT',
   'DOTUSDT',
   'LINKUSDT',
-  'MATICUSDT',
+  'POLUSDT',
   'NEARUSDT',
   'APTUSDT',
   'ARBUSDT',
@@ -565,23 +566,58 @@ async function ensureExchangeAvailable() {
 }
 
 // -------------------------------------------------------------
-// TELEGRAM BOT AUTO-SCANNER SYSTEM
+// TELEGRAM BOT AUTO-SCANNER SYSTEM & TP/SL TRACKER
 // -------------------------------------------------------------
-async function sendToTelegram(signalData) {
+const ACTIVE_TRADES_FILE = path.join(__dirname, 'active_trades.json');
+
+function loadActiveTrades() {
+  if (fs.existsSync(ACTIVE_TRADES_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(ACTIVE_TRADES_FILE, 'utf8'));
+    } catch (e) {
+      console.error('[tracker] Gagal membaca active_trades.json:', e.message);
+    }
+  }
+  return {};
+}
+
+function saveActiveTrades(trades) {
+  try {
+    fs.writeFileSync(ACTIVE_TRADES_FILE, JSON.stringify(trades, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[tracker] Gagal menyimpan active_trades.json:', e.message);
+  }
+}
+
+async function sendTelegramMessage(text) {
   const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-  
-  if (!TELEGRAM_TOKEN || !CHAT_ID) return;
+  if (!TELEGRAM_TOKEN || !CHAT_ID) return false;
 
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  try {
+    await axios.post(url, {
+      chat_id: CHAT_ID,
+      text: text,
+      parse_mode: 'Markdown'
+    });
+    return true;
+  } catch (err) {
+    console.error(`[telegram] Gagal mengirim pesan ke Telegram:`, err.message);
+    return false;
+  }
+}
+
+async function sendToTelegram(signalData) {
   const signalText = signalData.signal.signal;
-  // Emoji indicator
   const emoji = signalText.includes('LONG') ? '🟢' : (signalText.includes('SHORT') ? '🔴' : '⚪');
+  const entry = signalData.market ? signalData.market.price : signalData.price;
 
   const text = `🚨 *SIGNAL ALERT: ${signalData.symbol}* ${emoji}
   
 Tipe: *${signalText}* (Skor: ${signalData.signal.score})
 Confidence: ${signalData.signal.confidence}%
-Harga Entry: ${signalData.market ? signalData.market.price : signalData.price}
+Harga Entry: ${entry}
 
 🎯 *TARGET:*
 TP 1: ${signalData.signal.levels.tp1}
@@ -591,22 +627,13 @@ TP 3: ${signalData.signal.levels.tp3}
 🛑 *STOP LOSS:* ${signalData.signal.levels.sl}
 ⚖️ RR Ratio: ${signalData.signal.levels.rr}`;
 
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-  try {
-    await axios.post(url, {
-      chat_id: CHAT_ID,
-      text: text,
-      parse_mode: 'Markdown'
-    });
-    console.log(`[telegram] Sinyal ${signalData.symbol} berhasil dikirim ke Telegram.`);
-  } catch (err) {
-    console.error(`[telegram] Gagal mengirim ${signalData.symbol} ke Telegram:`, err.message);
-  }
+  const sent = await sendTelegramMessage(text);
+  if (sent) console.log(`[telegram] Sinyal ${signalData.symbol} berhasil dikirim ke Telegram.`);
 }
 
 async function runBackgroundScanner() {
   const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-  if (!TELEGRAM_TOKEN) return; // Skip if telegram bot not configured
+  if (!TELEGRAM_TOKEN) return;
   
   const minScore = parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7;
   const interval = '1h'; // Default signal interval
@@ -621,6 +648,8 @@ async function runBackgroundScanner() {
     return;
   }
 
+  const activeTrades = loadActiveTrades();
+
   for (let i = 0; i < WATCHLIST.length; i += batchSize) {
     const batch = WATCHLIST.slice(i, i + batchSize);
     const settled = await Promise.allSettled(
@@ -630,9 +659,24 @@ async function runBackgroundScanner() {
     for (const result of settled) {
       if (result.status === 'fulfilled') {
         const item = result.value;
-        // Hanya kirim jika mutlak score >= minScore
         if (Math.abs(item.signal.score) >= minScore) {
+          const entry = item.market ? item.market.price : item.price;
+          
+          // Overwrite trade jika ada sinyal ekstrim berulang
           await sendToTelegram(item);
+          
+          activeTrades[item.symbol] = {
+            symbol: item.symbol,
+            type: item.signal.signal.includes('LONG') ? 'LONG' : 'SHORT',
+            entry: parseFloat(entry),
+            tp1: parseFloat(item.signal.levels.tp1),
+            tp2: parseFloat(item.signal.levels.tp2),
+            tp3: parseFloat(item.signal.levels.tp3),
+            sl: parseFloat(item.signal.levels.sl),
+            hitTp1: false,
+            hitTp2: false,
+            timestamp: Date.now()
+          };
         }
       }
     }
@@ -641,7 +685,84 @@ async function runBackgroundScanner() {
       await sleep(200);
     }
   }
+  
+  saveActiveTrades(activeTrades);
   console.log(`[cron-scan] Pemindaian selesai.`);
+}
+
+async function monitorActiveTrades() {
+  const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  if (!TELEGRAM_TOKEN) return;
+
+  const activeTrades = loadActiveTrades();
+  const symbols = Object.keys(activeTrades);
+  if (symbols.length === 0) return; // Tidak ada koin yang di-hold
+
+  try {
+    // API yang sangat ringan, mengambil semua current price futures
+    const response = await api.get('/fapi/v1/ticker/price');
+    const prices = response.data;
+    let modified = false;
+
+    // Convert array to map untuk lookup cepat
+    const priceMap = {};
+    for (const p of prices) {
+      priceMap[p.symbol] = parseFloat(p.price);
+    }
+
+    for (const sym of symbols) {
+      const trade = activeTrades[sym];
+      const currentPrice = priceMap[sym];
+      if (!currentPrice) continue;
+
+      const isLong = trade.type === 'LONG';
+
+      // 1. Cek SL
+      const hitSl = isLong ? (currentPrice <= trade.sl) : (currentPrice >= trade.sl);
+      if (hitSl) {
+        await sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}`);
+        delete activeTrades[sym];
+        modified = true;
+        continue;
+      }
+
+      // 2. Cek TP3 (Full Close)
+      const hitTp3 = isLong ? (currentPrice >= trade.tp3) : (currentPrice <= trade.tp3);
+      if (hitTp3) {
+        await sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nHarga Tersentuh: ${currentPrice}\n\n🎉 Selamat, Trade Selesai! 💰`);
+        delete activeTrades[sym];
+        modified = true;
+        continue;
+      }
+
+      // 3. Cek TP2
+      if (!trade.hitTp2) {
+        const hitTp2 = isLong ? (currentPrice >= trade.tp2) : (currentPrice <= trade.tp2);
+        if (hitTp2) {
+          trade.hitTp2 = true;
+          trade.hitTp1 = true;
+          modified = true;
+          await sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nSisa Target: TP3 (${trade.tp3})`);
+        }
+      }
+
+      // 4. Cek TP1 (hanya dieksekusi jika harga naik wajar belum ke TP2)
+      if (!trade.hitTp1) {
+        const hitTp1 = isLong ? (currentPrice >= trade.tp1) : (currentPrice <= trade.tp1);
+        if (hitTp1) {
+          trade.hitTp1 = true;
+          modified = true;
+          await sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nSisa Target: TP2 (${trade.tp2}), TP3 (${trade.tp3})`);
+        }
+      }
+    }
+
+    if (modified) {
+      saveActiveTrades(activeTrades);
+    }
+  } catch (error) {
+    console.error('[tracker] Error saat memonitor harga Binance:', error.message);
+  }
 }
 
 // Inisialisasi Cron Job Scanner
@@ -650,7 +771,14 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
   cron.schedule(schedule, () => {
     runBackgroundScanner();
   });
+  
+  // Fitur Tracker Koin memantau harga real-time setiap 1 menit!
+  cron.schedule('* * * * *', () => {
+    monitorActiveTrades();
+  });
+  
   console.log(`[cron-scan] Bot Telegram aktif. Auto-scan menggunakan jadwal: ${schedule}`);
+  console.log(`[tracker] Fitur Tracker Koin (TP/SL) aktif memantau harga setiap 1 menit.`);
 }
 // -------------------------------------------------------------
 
