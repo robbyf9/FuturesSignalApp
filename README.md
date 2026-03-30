@@ -1,6 +1,6 @@
 # 🚀 Futures Signal Scanner Pro
 Aplikasi signal trading Binance Futures — **30 koin**, **7 indikator teknikal**, entry/TP/SL otomatis.
-
+http://obinance.alwaysdata.net/
 ---
 
 ## 📦 Fitur Lengkap
