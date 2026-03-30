@@ -13,7 +13,8 @@ const cron = require('node-cron');
 dotenv.config();
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.ALWAYSDATA_HTTPD_PORT || process.env.PORT) || 3000;
+const HOST = process.env.ALWAYSDATA_HTTPD_IP || '0.0.0.0';
 const DEFAULT_BINANCE_BASE_URL = 'https://fapi.binance.com';
 const REQUEST_TIMEOUT_MS = Number(process.env.BINANCE_TIMEOUT_MS) || 15000;
 
@@ -795,10 +796,10 @@ app.use((err, _req, res, _next) => {
   handleRouteError(res, err, 'Unhandled server error');
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, HOST, () => {
   console.log('\n==========================================');
   console.log('  Futures Signal Scanner');
-  console.log(`  http://localhost:${PORT}`);
+  console.log(`  http://${HOST}:${PORT}`);
   console.log(`  Watching ${WATCHLIST.length} pairs`);
   console.log(`  Binance base URL: ${getActiveBaseUrl()}`);
   if (BINANCE_BASE_URLS.length > 1) {
