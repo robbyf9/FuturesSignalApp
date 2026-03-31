@@ -160,13 +160,13 @@ let WATCHLIST = [
 
 async function updateWatchlist() {
   try {
-    const { data } = await api.get('/fapi/v1/ticker/24hr');
+    const { data } = await safeGet('/fapi/v1/ticker/24hr');
     const eligible = data
       .filter((item) => {
         const symbol = item.symbol;
         if (!symbol.endsWith('USDT') || symbol.includes('_')) return false;
-        // Hanya koin dengan volume 24 jam > 50 juta USDT (mengurangi koin sepi di Alwaysdata)
-        return parseFloat(item.quoteVolume) >= 50000000;
+        // Hanya koin dengan volume 24 jam > 30 juta USDT (keseimbangan stabilitas & jumlah koin)
+        return parseFloat(item.quoteVolume) >= 30000000;
       })
       .map((item) => item.symbol);
 
