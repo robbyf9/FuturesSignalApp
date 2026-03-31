@@ -167,6 +167,9 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
     <div class="nav-item" id="nav-active-trades" onclick="showView('active-trades')">
       <span>⊡</span> Active Trades
     </div>
+    <div class="nav-item" id="nav-trade-history" onclick="showView('trade-history')">
+      <span>◪</span> Trading History
+    </div>
   </nav>
   <div class="sb-label">TOP SIGNALS</div>
   <div id="sb-pairs"></div>
@@ -279,8 +282,34 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
           <div id="at-body"><div class="ld"><span>Memuat posisi...</span></div></div>
         </div>
       </div>
-    </div>
+    <!-- ── TRADE HISTORY VIEW ── -->
+    <div id="view-trade-history" style="display:none">
+      <!-- Summary Stats -->
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:15px; margin-bottom:20px;">
+        <div class="card" style="padding:15px; text-align:center">
+          <div style="font-size:10px; color:var(--tx3); margin-bottom:4px; letter-spacing:1px">WIN RATE</div>
+          <div id="hist-win-rate" style="font-size:24px; font-weight:700; color:var(--g)">0%</div>
+        </div>
+        <div class="card" style="padding:15px; text-align:center">
+          <div style="font-size:10px; color:var(--tx3); margin-bottom:4px; letter-spacing:1px">TOTAL PROFIT (USDT)</div>
+          <div id="hist-total-pnl" style="font-size:24px; font-weight:700">0.00</div>
+        </div>
+        <div class="card" style="padding:15px; text-align:center">
+          <div style="font-size:10px; color:var(--tx3); margin-bottom:4px; letter-spacing:1px">COMPLETED TRADES</div>
+          <div id="hist-total-trades" style="font-size:24px; font-weight:700">0</div>
+        </div>
+      </div>
 
+      <!-- History Table -->
+      <div class="sc-card">
+        <div class="sc-hd">
+          <span class="ct">COMPLETED TRADES HISTORY</span>
+        </div>
+        <div id="hist-body">
+          <!-- Items will be injected here -->
+        </div>
+      </div>
+    </div>
   </div><!-- /content -->
 </main>
 </div>
@@ -305,12 +334,14 @@ function showView(v) {
     scanner:'Market Scanner',
     opportunities:'Top Opportunities',
     funding:'Funding Rates',
-    'active-trades':'Active Trades Monitor'
+    'active-trades':'Active Trades Monitor',
+    'trade-history':'Trading History & Statistics'
   };
   document.getElementById('page-title').textContent = titles[v];
   if (v==='funding') loadFunding();
   if (v==='opportunities') renderOpportunities();
   if (v==='active-trades') loadActiveTrades();
+  if (v==='trade-history') loadTradeHistory();
 }
 
 // ─── Interval ─────────────────────────────────────────────────────────────────
@@ -698,6 +729,63 @@ async function loadActiveTrades() {
     checkApiStatus();
   } catch(e) {
     body.innerHTML = `<div class="ld" style="color:var(--r)">⚠ Gagal sinkronisasi data riel: ${e.message}</div>`;
+  }
+}
+
+async function loadTradeHistory() {
+  const body = document.getElementById('hist-body');
+  body.innerHTML = `<div class="ld"><div class="sp"></div><span>Memuat riwayat trading...</span></div>`;
+  
+  try {
+    const res = await fetch(`${API}/trade-history`);
+    const data = await res.json();
+    
+    // Update Stats
+    document.getElementById('hist-total-trades').textContent = data.stats.totalTrades;
+    document.getElementById('hist-win-rate').textContent = (data.stats.winRate || 0) + '%';
+    
+    const pnlEl = document.getElementById('hist-total-pnl');
+    const pnlVal = parseFloat(data.stats.totalPnL);
+    pnlEl.textContent = (pnlVal > 0 ? '+' : '') + pnlVal.toFixed(2);
+    pnlEl.style.color = pnlVal >= 0 ? 'var(--g)' : 'var(--r)';
+
+    if (!data.history || data.history.length === 0) {
+      body.innerHTML = `<div class="ld" style="padding:40px">Belum ada riwayat transaksi yang terselesaikan.</div>`;
+      return;
+    }
+
+    body.innerHTML = `
+      <div style="display:grid; grid-template-columns: 1fr 80px 100px 100px 120px 140px; padding:10px 16px; border-bottom:1px solid var(--br); font-size:10px; color:var(--tx3); text-transform:uppercase">
+        <span>Koin / Tipe</span>
+        <span>Posisi</span>
+        <span>Entry</span>
+        <span>Exit</span>
+        <span>Profit (USDT)</span>
+        <span>Waktu Selesai</span>
+      </div>
+      ` + data.history.map(t => {
+      const isWin = t.pnlUsdt >= 0;
+      const color = isWin ? 'var(--g)' : 'var(--r)';
+      const date = new Date(t.timestamp).toLocaleString('id-ID', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
+      
+      return `<div class="tr" style="grid-template-columns: 1fr 80px 100px 100px 120px 140px">
+        <span style="font-weight:600">${t.symbol.replace('USDT','')}</span>
+        <span><span class="pill ${t.type.toLowerCase()}">${t.type}</span></span>
+        <span>$${fmtP(t.entry)}</span>
+        <span>$${fmtP(t.exit)}</span>
+        <div style="display:flex; flex-direction:column">
+          <span style="color:${color}; font-weight:600">${isWin ? '+' : ''}${t.pnlUsdt} USDT</span>
+          <span style="color:${color}; font-size:9px">${isWin ? '+' : ''}${t.pnlPercent}%</span>
+        </div>
+        <div style="display:flex; flex-direction:column">
+           <span style="font-size:11px">${date}</span>
+           <span style="font-size:9px; color:var(--tx3)">${t.reason || 'Selesai'}</span>
+        </div>
+      </div>`;
+    }).join('');
+    
+  } catch (e) {
+    body.innerHTML = `<div class="ld" style="color:var(--r)">⚠ Gagal memuat histori: ${e.message}</div>`;
   }
 }
 

@@ -818,6 +818,7 @@ async function ensureExchangeAvailable() {
 // TELEGRAM BOT AUTO-SCANNER SYSTEM & TP/SL TRACKER
 // -------------------------------------------------------------
 const ACTIVE_TRADES_FILE = path.join(__dirname, 'active_trades.json');
+const TRADE_HISTORY_FILE = path.join(__dirname, 'trade_history.json');
 
 function loadActiveTrades() {
   // Gunakan cache jika sudah tersedia
@@ -841,6 +842,48 @@ function saveActiveTrades(trades) {
     fs.writeFileSync(ACTIVE_TRADES_FILE, JSON.stringify(trades, null, 2), 'utf8');
   } catch (e) {
     console.error('[tracker] Gagal menyimpan active_trades.json:', e.message);
+  }
+}
+
+function loadHistory() {
+  if (fs.existsSync(TRADE_HISTORY_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(TRADE_HISTORY_FILE, 'utf8'));
+    } catch (e) {
+      console.error('[history] Gagal membaca trade_history.json:', e.message);
+    }
+  }
+  return [];
+}
+
+function saveToHistory(trade) {
+  const history = loadHistory();
+  const margin = parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
+  const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
+  
+  // Hitung profit nominal (USDT)
+  const isLong = trade.type === 'LONG';
+  const pnlPercent = isLong 
+    ? ((trade.exit - trade.entry) / trade.entry) * 100 
+    : ((trade.entry - trade.exit) / trade.entry) * 100;
+  const pnlUsdt = (pnlPercent / 100) * (margin * leverage);
+
+  const entry = {
+    ...trade,
+    pnlPercent: parseFloat(pnlPercent.toFixed(2)),
+    pnlUsdt: parseFloat(pnlUsdt.toFixed(2)),
+    timestamp: Date.now()
+  };
+
+  history.unshift(entry); // Masukkan ke paling depan
+  // Simpan maksimal 200 trade terakhir agar tidak bengkak filenya
+  const trimmed = history.slice(0, 200);
+  
+  try {
+    fs.writeFileSync(TRADE_HISTORY_FILE, JSON.stringify(trimmed, null, 2), 'utf8');
+    console.log(`[history] Trade ${trade.symbol} tersimpan. PnL: ${entry.pnlUsdt} USDT`);
+  } catch (e) {
+    console.error('[history] Gagal menyimpan trade_history.json:', e.message);
   }
 }
 
@@ -1062,6 +1105,16 @@ function checkTradeLevels(trade, currentPrice) {
     if (shouldNotify('SL')) {
       sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
       const activeTrades = loadActiveTrades();
+      
+      // Simpan ke History sebelum dihapus
+      saveToHistory({
+        symbol: sym,
+        type: trade.type,
+        entry: trade.entry,
+        exit: currentPrice,
+        reason: 'STOP LOSS'
+      });
+      
       delete activeTrades[sym];
       // Hapus cache notif juga agar koin ini bisa di-trade lagi nanti
       delete lastNotified[`${sym}_SL`];
@@ -1078,6 +1131,16 @@ function checkTradeLevels(trade, currentPrice) {
     if (shouldNotify('TP3')) {
       sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
       const activeTrades = loadActiveTrades();
+      
+      // Simpan ke History sebelum dihapus
+      saveToHistory({
+        symbol: sym,
+        type: trade.type,
+        entry: trade.entry,
+        exit: currentPrice,
+        reason: 'TAKE PROFIT (TP3)'
+      });
+      
       delete activeTrades[sym];
       return { modified: true };
     }
@@ -1178,11 +1241,30 @@ app.get('/api/health', (_, res) => {
     status: 'ok',
     timestamp: Date.now(),
     pairs: WATCHLIST.length,
-    version: '2.2',
+    version: '2.5',
     baseURL: getActiveBaseUrl(),
     configuredBaseURLs: BINANCE_BASE_URLS,
     tradingTimeframe: process.env.TRADING_TIMEFRAME || '1h',
     tradingEnabled: process.env.TRADING_ENABLED === 'true'
+  });
+});
+
+app.get('/api/trade-history', (req, res) => {
+  const history = loadHistory();
+  
+  // Hitung stats kumulatif
+  const totalTrades = history.length;
+  const wins = history.filter(t => t.pnlUsdt > 0).length;
+  const totalPnL = history.reduce((sum, t) => sum + t.pnlUsdt, 0);
+  
+  res.json({
+    history: history.slice(0, 50),
+    stats: {
+      totalTrades,
+      winRate: totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(1) : 0,
+      totalPnL: totalPnL.toFixed(2),
+      currency: 'USDT'
+    }
   });
 });
 
