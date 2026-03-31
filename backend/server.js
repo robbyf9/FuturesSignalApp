@@ -300,13 +300,15 @@ async function executeBinanceTrade(signalData) {
     const mainOrder = await tradingApi.post('/fapi/v1/order', orderParams);
     console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId}`);
 
-    // 4. TP & SL (Hanya jika sinyal memberikan level)
+    // 4. TP & SL (MENGGUNAKAN NEW ALGO ORDER ENDPOINT)
+    // Sejak Des 2024, TP/SL Market wajib lewat /fapi/v1/algoOrder
     if (signal.levels) {
       const tpPrice = parseFloat(signal.levels.tp2).toFixed(precision.price);
       const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
 
-      // TP Order (Take Profit Market)
+      // TP Order (Take Profit Market via Algo)
       const tpParams = signRequest({
+        algoType: 'CONDITIONAL',
         symbol,
         side: oppositeSide,
         type: 'TAKE_PROFIT_MARKET',
@@ -314,10 +316,11 @@ async function executeBinanceTrade(signalData) {
         closePosition: 'true',
         workingType: 'MARK_PRICE'
       });
-      await tradingApi.post('/fapi/v1/order', tpParams);
+      await tradingApi.post('/fapi/v1/algoOrder', tpParams);
 
-      // SL Order (Stop Market)
+      // SL Order (Stop Market via Algo)
       const slParams = signRequest({
+        algoType: 'CONDITIONAL',
         symbol,
         side: oppositeSide,
         type: 'STOP_MARKET',
@@ -325,9 +328,9 @@ async function executeBinanceTrade(signalData) {
         closePosition: 'true',
         workingType: 'MARK_PRICE'
       });
-      await tradingApi.post('/fapi/v1/order', slParams);
+      await tradingApi.post('/fapi/v1/algoOrder', slParams);
       
-      console.log(`[trade] TP/SL Terpasang: TP2 @ ${tpPrice}, SL @ ${slPrice}`);
+      console.log(`[trade] TP/SL Terpasang (via Algo): TP2 @ ${tpPrice}, SL @ ${slPrice}`);
       await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi di Binance Testnet beres!_`);
     }
 
