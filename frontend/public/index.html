@@ -638,6 +638,11 @@ function fmtP(n) {
     ? n.toLocaleString('id-ID',{maximumFractionDigits:2})
     : n.toFixed(4);
 }
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  runScan();
+});
 </script>
 </body>
 </html>

@@ -127,38 +127,31 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../frontend/public')));
 
-const WATCHLIST = [
-  'BTCUSDT',
-  'ETHUSDT',
-  'BNBUSDT',
-  'SOLUSDT',
-  'XRPUSDT',
-  'DOGEUSDT',
-  'ADAUSDT',
-  'AVAXUSDT',
-  'DOTUSDT',
-  'LINKUSDT',
-  'POLUSDT',
-  'NEARUSDT',
-  'APTUSDT',
-  'ARBUSDT',
-  'OPUSDT',
-  'INJUSDT',
-  'SUIUSDT',
-  'SEIUSDT',
-  'TIAUSDT',
-  'WIFUSDT',
-  'UNIUSDT',
-  'AAVEUSDT',
-  'MKRUSDT',
-  'CRVUSDT',
-  'LDOUSDT',
-  'ATOMUSDT',
-  'ALGOUSDT',
-  'FTMUSDT',
-  'HBARUSDT',
-  'ICPUSDT',
+let WATCHLIST = [
+  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'
 ];
+
+async function updateWatchlist() {
+  try {
+    const { data } = await api.get('/fapi/v1/ticker/24hr');
+    const eligible = data
+      .filter((item) => {
+        const symbol = item.symbol;
+        if (!symbol.endsWith('USDT') || symbol.includes('_')) return false;
+        // Hanya koin dengan volume 24 jam > 15 juta USDT (cukup likuid)
+        return parseFloat(item.quoteVolume) >= 15000000;
+      })
+      .map((item) => item.symbol);
+
+    if (eligible.length > 0) {
+      WATCHLIST = eligible;
+      console.log(`[system] Watchlist diperbarui otomatis: ${WATCHLIST.length} koin siap discan.`);
+    }
+  } catch (error) {
+    console.error('[system] Gagal memperbarui watchlist otomatis:', error.message);
+  }
+}
+
 
 const api = axios.create({
   baseURL: getActiveBaseUrl(),
@@ -637,9 +630,9 @@ async function runBackgroundScanner() {
   
   const minScore = parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7;
   const interval = '1h'; // Default signal interval
-  const batchSize = 5;
+  const batchSize = 10;
 
-  console.log(`\n[cron-scan] Memulai pemindaian sinyal otomatis untuk Telegram...`);
+  console.log(`\n[cron-scan] Memulai pemindaian sinyal otomatis untuk ${WATCHLIST.length} koin...`);
   
   try {
     await ensureExchangeAvailable();
@@ -817,8 +810,8 @@ app.get('/api/cron-run', async (req, res) => {
 
 app.get('/api/scanner', async (req, res) => {
   const interval = req.query.interval || '1h';
-  const minScore = parseInt(req.query.minScore, 10) || 0;
-  const batchSize = 5;
+  const minScore = parseInt(req.query.minScore, 10) || 5; // Default ubah dari 0 ke 5, agar yg tampil berpotensi saja
+  const batchSize = 10;
   const startedAt = Date.now();
   const results = [];
   const failures = [];
@@ -943,14 +936,16 @@ app.use((err, _req, res, _next) => {
   handleRouteError(res, err, 'Unhandled server error');
 });
 
-app.listen(PORT, HOST, () => {
+app.listen(PORT, HOST, async () => {
   console.log('\n==========================================');
   console.log('  Futures Signal Scanner');
   console.log(`  http://${HOST}:${PORT}`);
-  console.log(`  Watching ${WATCHLIST.length} pairs`);
   console.log(`  Binance base URL: ${getActiveBaseUrl()}`);
   if (BINANCE_BASE_URLS.length > 1) {
     console.log(`  Failover endpoints: ${BINANCE_BASE_URLS.join(', ')}`);
   }
   console.log('==========================================\n');
+  
+  await updateWatchlist();
+  setInterval(updateWatchlist, 3600 * 1000); // 1 hour
 });
