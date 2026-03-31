@@ -38,7 +38,13 @@ function parseBaseUrls() {
   );
 }
 
-const BINANCE_BASE_URLS = parseBaseUrls();
+const BINANCE_BASE_URLS = [
+  'https://fapi.binance.com',
+  'https://fapi1.binance.com',
+  'https://fapi2.binance.com',
+  'https://fapi3.binance.com',
+  'https://fapi.binance.us'
+];
 let activeBaseIndex = 0;
 
 function getActiveBaseUrl() {
@@ -159,8 +165,8 @@ async function updateWatchlist() {
       .filter((item) => {
         const symbol = item.symbol;
         if (!symbol.endsWith('USDT') || symbol.includes('_')) return false;
-        // Hanya koin dengan volume 24 jam > 15 juta USDT (cukup likuid)
-        return parseFloat(item.quoteVolume) >= 15000000;
+        // Hanya koin dengan volume 24 jam > 50 juta USDT (mengurangi koin sepi di Alwaysdata)
+        return parseFloat(item.quoteVolume) >= 50000000;
       })
       .map((item) => item.symbol);
 
@@ -189,17 +195,18 @@ api.interceptors.request.use((config) => {
 });
 
 // Helper: Safe GET with Auto-Rotation & Retries
-async function safeGet(url, params = {}, retries = 2) {
+async function safeGet(url, params = {}, retries = 3) {
   for (let i = 0; i <= retries; i++) {
     try {
       return await api.get(url, { params });
     } catch (error) {
       const status = error.response?.status;
-      // Jika Rate Limit (429) atau Service Unavailable (503), putar URL dan coba lagi
+      // Jika Rate Limit (429) atau Service Unavailable (503), putar URL dan COOLDOWN lebih lama
       if ((status === 429 || status === 503 || !error.response) && i < retries) {
-        console.warn(`[api] Rotating URL after error ${status || 'network'}...`);
+        const wait = status === 429 ? 3000 + (i * 2000) : 500;
+        console.warn(`[api] Error ${status || 'network'}. Rotating URL & cooldown ${wait}ms...`);
         rotateBaseUrl();
-        await sleep(500 * (i + 1)); // Jeda sedikit sebelum coba lagi
+        await sleep(wait); 
         continue;
       }
       throw error;
