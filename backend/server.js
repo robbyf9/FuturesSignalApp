@@ -603,7 +603,7 @@ function calcVWAP(klines) {
 function generateSignal(indicators, price, fundingRate, interval = '1h') {
   let score = 0;
   const reasons = [];
-  const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap } = indicators;
+  const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap, atr } = indicators;
   const isScalp = interval === '1m' || interval === '5m';
 
   // 1. RSI Logic (Scalping uses RSI 7)
@@ -784,67 +784,68 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       safeGet('/fapi/v1/premiumIndex', { symbol }),
     ]);
 
-  const klines = klinesRes.data;
-  const ticker = tickerRes.data;
-  const funding = fundingRes.data;
+    const klines = klinesRes.data;
+    const ticker = tickerRes.data;
+    const funding = fundingRes.data;
 
-  if (!Array.isArray(klines) || klines.length === 0) {
-    throw new Error(`No kline data returned for ${symbol}`);
-  }
-
-  const closes = klines.map((kline) => parseFloat(kline[4]));
-  const price = parseFloat(ticker.lastPrice);
-  const fundingRate = parseFloat(funding.lastFundingRate) * 100;
-
-  const indicators = {
-    rsi: calcRSI(closes),
-    rsi7: calcRSI(closes, 7),
-    macd: calcMACD(closes),
-    ema9: calcEMA(closes, 9),
-    ema21: calcEMA(closes, 21),
-    ema20: calcEMA(closes, 20),
-    ema50: calcEMA(closes, 50),
-    ema200: calcEMA(closes, 200),
-    bb: calcBB(closes),
-    stochRSI: calcStochRSI(closes),
-    atr: calcATR(klines),
-    vwap: calcVWAP(klines.slice(-24)),
-  };
-
-  const signal = generateSignal(indicators, price, fundingRate);
-  const result = {
-    symbol,
-    price,
-    priceChangePercent: parseFloat(ticker.priceChangePercent),
-    high24h: parseFloat(ticker.highPrice),
-    low24h: parseFloat(ticker.lowPrice),
-    volume24h: parseFloat(ticker.volume),
-    quoteVolume: parseFloat(ticker.quoteVolume),
-    fundingRate,
-    markPrice: parseFloat(funding.markPrice),
-    stochK: indicators.stochRSI.k,
-    indicators,
-    signal: generateSignal(indicators, price, fundingRate, interval),
-  };
-
-  if (full) {
-    result.klines = klines.slice(-100).map((kline) => ({
-      time: kline[0],
-      open: Number(kline[1]),
-      high: Number(kline[2]),
-      low: Number(kline[3]),
-      close: Number(kline[4]),
-      volume: Number(kline[5]),
-    }));
-
-    try {
-      const openInterestRes = await api.get('/fapi/v1/openInterest', { params: { symbol } });
-      result.openInterest = parseFloat(openInterestRes.data.openInterest);
-    } catch (error) {
-      result.openInterest = null;
-      console.warn(`[warn] open interest unavailable for ${symbol}: ${normalizeAxiosError(error).message}`);
+    if (!Array.isArray(klines) || klines.length === 0) {
+      throw new Error(`No kline data returned for ${symbol}`);
     }
-  }
+
+    const closes = klines.map((kline) => parseFloat(kline[4]));
+    const price = parseFloat(ticker.lastPrice);
+    const fundingRate = parseFloat(funding.lastFundingRate) * 100;
+
+    const indicators = {
+      rsi: calcRSI(closes),
+      rsi7: calcRSI(closes, 7),
+      macd: calcMACD(closes),
+      ema9: calcEMA(closes, 9),
+      ema21: calcEMA(closes, 21),
+      ema20: calcEMA(closes, 20),
+      ema50: calcEMA(closes, 50),
+      ema200: calcEMA(closes, 200),
+      bb: calcBB(closes),
+      stochRSI: calcStochRSI(closes),
+      atr: calcATR(klines),
+      vwap: calcVWAP(klines.slice(-24)),
+    };
+
+    const result = {
+      symbol,
+      price,
+      priceChangePercent: parseFloat(ticker.priceChangePercent),
+      high24h: parseFloat(ticker.highPrice),
+      low24h: parseFloat(ticker.lowPrice),
+      volume24h: parseFloat(ticker.volume),
+      quoteVolume: parseFloat(ticker.quoteVolume),
+      fundingRate,
+      markPrice: parseFloat(funding.markPrice),
+      stochK: indicators.stochRSI.k,
+      indicators,
+      signal: generateSignal(indicators, price, fundingRate, interval),
+    };
+
+    if (full) {
+      result.klines = klines.slice(-100).map((kline) => ({
+        time: kline[0],
+        open: Number(kline[1]),
+        high: Number(kline[2]),
+        low: Number(kline[3]),
+        close: Number(kline[4]),
+        volume: Number(kline[5]),
+      }));
+
+      try {
+        const openInterestRes = await api.get('/fapi/v1/openInterest', { params: { symbol } });
+        result.openInterest = parseFloat(openInterestRes.data.openInterest);
+      } catch (error) {
+        result.openInterest = null;
+        console.warn(`[warn] open interest unavailable for ${symbol}: ${normalizeAxiosError(error).message}`);
+      }
+    }
+
+    return result;
 
   } catch (err) {
     console.error(`[analyze] Error for ${symbol}:`, err.message);
