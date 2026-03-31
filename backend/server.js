@@ -877,6 +877,7 @@ async function runBackgroundScanner() {
   if (!TELEGRAM_TOKEN) return;
   
   const minScore = parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7;
+  const autoTradeMinConf = parseInt(process.env.AUTO_TRADE_MIN_CONFIDENCE, 10) || 80;
   const interval = process.env.TRADING_TIMEFRAME || '1h';
   const maxOpen = parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 5;
   const batchSize = 10;
@@ -919,12 +920,18 @@ async function runBackgroundScanner() {
             await sendToTelegram(item);
             console.log(`[telegram] Sinyal Baru: ${item.symbol} (${currentType})`);
             
-            // 🔥 EKSEKUSI AUTO-TRADE JIKA DIAKTIFKAN
+            // 🔥 EKSEKUSI AUTO-TRADE (Filter: Enabled, Slot Kosong, & Konfidensi Tinggi)
+            const meetsConfidence = item.signal.confidence >= autoTradeMinConf;
+            
             if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
-              executeBinanceTrade(item);
-              currentOpenPositions++;
+              if (meetsConfidence) {
+                executeBinanceTrade(item);
+                currentOpenPositions++;
+              } else {
+                console.log(`[trade] Skip auto-trade ${item.symbol}: Konfidensi (${item.signal.confidence}%) < target (${autoTradeMinConf}%)`);
+              }
             } else if (currentOpenPositions >= maxOpen) {
-              console.log(`[trade] Skip ${item.symbol}: Limit posisi maksimal (${maxOpen}) tercapai.`);
+              console.log(`[trade] Skip ${item.symbol}: Limit posisi maksimal (${maxOpen}) penuh.`);
             }
           } else {
             console.log(`[tracker] Update: ${item.symbol} tetap ${currentType}, notif diabaikan (anti-spam).`);
