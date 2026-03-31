@@ -254,12 +254,60 @@ async function getBinancePositions() {
   }
 }
 
-async function getBinanceOpenOrders() {
+async function getBinanceOpenOrders(symbol = null) {
   try {
-    return await fetchSigned('GET', '/fapi/v1/openOrders');
+    const params = symbol ? { symbol } : {};
+    return await fetchSigned('GET', '/fapi/v1/openOrders', params);
   } catch (err) {
-    console.error('[binance] Gagal ambil open orders:', err.response?.data?.msg || err.message);
+    console.error(`[binance] Gagal ambil open orders ${symbol || ''}:`, err.response?.data?.msg || err.message);
     return [];
+  }
+}
+
+async function moveStopLossToBreakEven(symbol, entryPrice, side) {
+  if (process.env.TRADING_ENABLED !== 'true') return false;
+  
+  try {
+    const info = await getExchangeInfo();
+    const precision = getSymbolPrecision(symbol, info);
+    
+    // 1. Ambil Open Orders untuk mencari SL (STOP_MARKET)
+    const openOrders = await getBinanceOpenOrders(symbol);
+    const slOrders = openOrders.filter(o => o.type === 'STOP_MARKET');
+    
+    // 2. Batalkan semua SL lama
+    for (const order of slOrders) {
+      await fetchSigned('DELETE', '/fapi/v1/order', {
+        symbol,
+        orderId: order.orderId
+      });
+      console.log(`[trade] SL Lama Dibatalkan: ${symbol} (${order.orderId})`);
+    }
+    
+    // 3. Pasang SL Baru di harga Entry + 0.1% (untuk cover fee & profit tipis)
+    // Long: Entry * 1.001, Short: Entry * 0.999
+    const isLong = side === 'BUY' || side === 'LONG';
+    const bePrice = isLong ? entryPrice * 1.001 : entryPrice * 0.999;
+    const finalBePrice = parseFloat(bePrice.toFixed(precision.price));
+    
+    const slParams = signRequest({
+      algoType: 'CONDITIONAL',
+      symbol,
+      side: isLong ? 'SELL' : 'BUY',
+      type: 'STOP_MARKET',
+      triggerPrice: finalBePrice,
+      closePosition: 'true',
+      workingType: 'MARK_PRICE'
+    });
+    
+    await tradingApi.post('/fapi/v1/algoOrder', slParams);
+    
+    console.log(`[trade] SL Moved to Break-Even: ${symbol} @ ${finalBePrice}`);
+    await sendTelegramMessage(`🛡️ *SL PLUS ACTIVATED: ${symbol}* 🛡️\n\nStop Loss telah digeser ke harga Entry (${finalBePrice}) untuk mengunci keuntungan. Trade ini sekarang aman dari kerugian (Risk-Free)!`);
+    return true;
+  } catch (err) {
+    console.error(`[trade] Gagal menggeser SL ke Break-Even ${symbol}:`, err.response?.data?.msg || err.message);
+    return false;
   }
 }
 
@@ -629,17 +677,30 @@ function generateSignal(indicators, price, fundingRate, interval = '1h') {
     confidence = Math.min(65, 48 + Math.abs(score) * 3);
   }
 
-  const atr = indicators.atr > 0 ? indicators.atr : price * (isScalp ? 0.005 : 0.015);
   const isLong = score >= 0;
   const entry = price;
   
-  // ATR Multipliers: Swing uses (1.5, 3, 5), Scalp uses (0.8, 1.5, 2.5) for tighter exits
-  const factor1 = isScalp ? 0.8 : 1.5;
+  // FIXED PROFIT SCALPING LOGIC
+  const fixedProfit = parseFloat(process.env.FIXED_PROFIT_USDT) || 0;
+  const margin = parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
+  const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
+  const posValue = margin * leverage;
+
+  let tp1;
+  if (fixedProfit > 0 && posValue > 0) {
+    // tp1 = entry ± (profit / total_position_value) * entry
+    const priceDiff = (fixedProfit / posValue) * entry;
+    tp1 = isLong ? entry + priceDiff : entry - priceDiff;
+  } else {
+    const factor1 = isScalp ? 0.8 : 1.5;
+    tp1 = isLong ? entry + atr * factor1 : entry - atr * factor1;
+  }
+
+  // ATR Multipliers for further targets
   const factor2 = isScalp ? 1.5 : 3.0;
   const factor3 = isScalp ? 2.5 : 5.0;
-  const slFactor = isScalp ? 0.8 : 1.0;
+  const slFactor = isScalp ? 1.0 : 1.2; // Sedikit dilonggarkan untuk scalp agar tidak gampang kena noise di awal
 
-  const tp1 = isLong ? entry + atr * factor1 : entry - atr * factor1;
   const tp2 = isLong ? entry + atr * factor2 : entry - atr * factor2;
   const tp3 = isLong ? entry + atr * factor3 : entry - atr * factor3;
   const sl = isLong ? entry - atr * slFactor : entry + atr * slFactor;
@@ -955,13 +1016,23 @@ async function monitorActiveTrades() {
         }
       }
 
-      // 4. Cek TP1 (hanya dieksekusi jika harga naik wajar belum ke TP2)
+      // 4. Cek TP1 (Memicu SL Plus / Break-Even)
       if (!trade.hitTp1) {
         const hitTp1 = isLong ? (currentPrice >= trade.tp1) : (currentPrice <= trade.tp1);
         if (hitTp1) {
           trade.hitTp1 = true;
           modified = true;
+          
           await sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nPnL Saat Ini: ${pnlStr}\nSisa Target: TP2 (${trade.tp2}), TP3 (${trade.tp3})`);
+          
+          // GESER STOP LOSS KE HARGA ENTRY (SL PLUS)
+          if (!trade.slMoved && process.env.TRADING_ENABLED === 'true') {
+            const success = await moveStopLossToBreakEven(sym, trade.entry, trade.type);
+            if (success) {
+              trade.slMoved = true;
+              trade.sl = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
+            }
+          }
         }
       }
     }
