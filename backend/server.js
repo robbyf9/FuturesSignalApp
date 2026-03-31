@@ -1320,11 +1320,16 @@ app.get('/api/scanner', async (req, res) => {
       const normalized = normalizeAxiosError(result.reason);
       failures.push(symbol);
       failureDetails.push({ symbol, error: normalized?.message || 'Unknown error' });
-      console.error(`  fail ${symbol}: ${normalized?.message || 'Unknown error'}`);
+      
+      // Jika terdeteksi Rate Limit (429), kurangi kecepatan secara drastis
+      if (normalized.status === 429) {
+        console.warn(`[scan] API Rate Limit! Menaikkan jeda pemindaian...`);
+      }
     });
 
+    // Perlama jeda antar batch dari 200ms ke 1000ms untuk amankan IP Alwaysdata
     if (i + batchSize < WATCHLIST.length) {
-      await sleep(200);
+      await sleep(1000); 
     }
   }
 
