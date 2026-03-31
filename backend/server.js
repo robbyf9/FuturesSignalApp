@@ -312,7 +312,7 @@ async function executeBinanceTrade(signalData) {
         symbol,
         side: oppositeSide,
         type: 'TAKE_PROFIT_MARKET',
-        stopPrice: tpPrice,
+        triggerPrice: tpPrice,
         closePosition: 'true',
         workingType: 'MARK_PRICE'
       });
@@ -324,7 +324,7 @@ async function executeBinanceTrade(signalData) {
         symbol,
         side: oppositeSide,
         type: 'STOP_MARKET',
-        stopPrice: slPrice,
+        triggerPrice: slPrice,
         closePosition: 'true',
         workingType: 'MARK_PRICE'
       });
