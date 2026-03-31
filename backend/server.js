@@ -797,6 +797,24 @@ app.get('/api/watchlist', (_, res) => {
   res.json({ pairs: WATCHLIST });
 });
 
+app.get('/api/cron-run', async (req, res) => {
+  console.log('[cron-trigger] Manual trigger received from API.');
+  try {
+    // Run scanner in background without waiting for it to finish (to avoid timeout)
+    runBackgroundScanner()
+      .then(() => console.log('[cron-trigger] Background scan completed.'))
+      .catch((err) => console.error('[cron-trigger] Background scan error:', err.message));
+    
+    res.json({
+      status: 'triggered',
+      message: 'Background scanner started',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to trigger scanner', details: error.message });
+  }
+});
+
 app.get('/api/scanner', async (req, res) => {
   const interval = req.query.interval || '1h';
   const minScore = parseInt(req.query.minScore, 10) || 0;
