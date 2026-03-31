@@ -186,7 +186,8 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:12px">
-      <span style="font-size:11px;color:var(--tx3);border-left:1px solid var(--br);padding-left:12px;margin-left:4px">
+      <span style="font-size:11px;color:var(--tx3);border-left:1px solid var(--br);padding-left:12px;margin-left:4px;display:flex;align-items:center;gap:6px">
+        <span id="scalper-tag" style="display:none;background:var(--rd);color:var(--r);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid var(--rb)">SCALPER MODE</span>
         <span id="api-status-dot" class="sdot"></span>
         <span id="api-status-text" onclick="checkApiStatus()" style="cursor:pointer">Cek API...</span>
       </span>
@@ -751,7 +752,18 @@ function fmtP(n) {
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  // Cek apakah server dalam mode scalping
+  try {
+    const res = await fetch(`${API}/health`);
+    const health = await res.json();
+    if (health.version && (health.tradingTimeframe === '5m' || health.tradingTimeframe === '1m')) {
+      document.getElementById('scalper-tag').style.display = 'inline-block';
+      curIv = health.tradingTimeframe;
+      setIv(curIv);
+    }
+  } catch(e){}
+  
   runScan();
   checkApiStatus();
 });

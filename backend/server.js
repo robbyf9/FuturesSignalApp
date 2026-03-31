@@ -504,53 +504,56 @@ function calcVWAP(klines) {
   return volume === 0 ? 0 : volumePrice / volume;
 }
 
-function generateSignal(indicators, price, fundingRate) {
+function generateSignal(indicators, price, fundingRate, interval = '1h') {
   let score = 0;
   const reasons = [];
-  const { rsi, macd, ema20, ema50, ema200, bb, stochRSI, vwap } = indicators;
+  const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap } = indicators;
+  const isScalp = interval === '1m' || interval === '5m';
 
-  if (rsi < 30) {
-    score += 3;
+  // 1. RSI Logic (Scalping uses RSI 7)
+  const rsiVal = indicators.rsi7 || rsi;
+  if (rsiVal < 30) {
+    score += isScalp ? 4 : 3;
     reasons.push('RSI strongly oversold (< 30)');
-  } else if (rsi < 40) {
+  } else if (rsiVal < 40) {
     score += 2;
-    reasons.push('RSI approaching oversold');
-  } else if (rsi < 50) {
-    score += 1;
-  } else if (rsi > 70) {
-    score -= 3;
+  } else if (rsiVal > 70) {
+    score -= isScalp ? 4 : 3;
     reasons.push('RSI strongly overbought (> 70)');
-  } else if (rsi > 60) {
+  } else if (rsiVal > 60) {
     score -= 2;
-    reasons.push('RSI approaching overbought');
-  } else {
-    score -= 1;
   }
 
+  // 2. MACD Logic
   if (macd.macd > macd.signal) {
     score += 2;
+    if (isScalp && macd.histogram > 0) score += 1;
     reasons.push('MACD bullish crossover');
   } else {
     score -= 2;
     reasons.push('MACD bearish crossover');
   }
-  score += macd.histogram > 0 ? 1 : -1;
 
-  if (ema20 > ema50) {
-    score += 2;
-    reasons.push('EMA20 above EMA50');
+  // 3. EMA Cross Logic (EMA 9/21 for Scalping, EMA 20/50 for Swing)
+  if (isScalp && ema9 && ema21) {
+    if (ema9 > ema21) {
+      score += 3;
+      reasons.push('EMA9 above EMA21 (Scalper Bullish)');
+    } else {
+      score -= 3;
+      reasons.push('EMA9 below EMA21 (Scalper Bearish)');
+    }
   } else {
-    score -= 2;
-    reasons.push('EMA20 below EMA50');
+    if (ema20 > ema50) {
+      score += 2;
+      reasons.push('EMA20 above EMA50');
+    } else {
+      score -= 2;
+      reasons.push('EMA20 below EMA50');
+    }
   }
 
-  if (ema50 > ema200) {
-    score += 1;
-    reasons.push('EMA50 above EMA200');
-  } else {
-    score -= 1;
-  }
-
+  // 4. Bollinger Bands
   if (price <= bb.lower) {
     score += 3;
     reasons.push('Price touched lower Bollinger Band');
@@ -626,13 +629,21 @@ function generateSignal(indicators, price, fundingRate) {
     confidence = Math.min(65, 48 + Math.abs(score) * 3);
   }
 
-  const atr = indicators.atr > 0 ? indicators.atr : price * 0.015;
+  const atr = indicators.atr > 0 ? indicators.atr : price * (isScalp ? 0.005 : 0.015);
   const isLong = score >= 0;
   const entry = price;
-  const tp1 = isLong ? entry + atr * 1.5 : entry - atr * 1.5;
-  const tp2 = isLong ? entry + atr * 3 : entry - atr * 3;
-  const tp3 = isLong ? entry + atr * 5 : entry - atr * 5;
-  const sl = isLong ? entry - atr : entry + atr;
+  
+  // ATR Multipliers: Swing uses (1.5, 3, 5), Scalp uses (0.8, 1.5, 2.5) for tighter exits
+  const factor1 = isScalp ? 0.8 : 1.5;
+  const factor2 = isScalp ? 1.5 : 3.0;
+  const factor3 = isScalp ? 2.5 : 5.0;
+  const slFactor = isScalp ? 0.8 : 1.0;
+
+  const tp1 = isLong ? entry + atr * factor1 : entry - atr * factor1;
+  const tp2 = isLong ? entry + atr * factor2 : entry - atr * factor2;
+  const tp3 = isLong ? entry + atr * factor3 : entry - atr * factor3;
+  const sl = isLong ? entry - atr * slFactor : entry + atr * slFactor;
+  
   const rr = Math.abs(sl - entry) > 0
     ? parseFloat((Math.abs(tp2 - entry) / Math.abs(sl - entry)).toFixed(2))
     : 0;
@@ -675,18 +686,20 @@ async function analyzePair(symbol, interval = '1h', full = false) {
   const price = parseFloat(ticker.lastPrice);
   const fundingRate = parseFloat(funding.lastFundingRate) * 100;
 
-  const indicators = {
-    rsi: calcRSI(closes),
-    rsi7: calcRSI(closes, 7),
-    macd: calcMACD(closes),
-    ema20: calcEMA(closes, 20),
-    ema50: calcEMA(closes, 50),
-    ema200: calcEMA(closes, 200),
-    bb: calcBB(closes),
-    stochRSI: calcStochRSI(closes),
-    atr: calcATR(klines),
-    vwap: calcVWAP(klines.slice(-24)),
-  };
+    indicators: {
+      rsi: calcRSI(closes),
+      rsi7: calcRSI(closes, 7),
+      macd: calcMACD(closes),
+      ema9: calcEMA(closes, 9),
+      ema21: calcEMA(closes, 21),
+      ema20: calcEMA(closes, 20),
+      ema50: calcEMA(closes, 50),
+      ema200: calcEMA(closes, 200),
+      bb: calcBB(closes),
+      stochRSI: calcStochRSI(closes),
+      atr: calcATR(klines),
+      vwap: calcVWAP(klines.slice(-24)),
+    },
 
   const signal = generateSignal(indicators, price, fundingRate);
   const result = {
@@ -701,7 +714,7 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     markPrice: parseFloat(funding.markPrice),
     stochK: indicators.stochRSI.k,
     indicators,
-    signal,
+    signal: generateSignal(indicators, price, fundingRate, interval),
   };
 
   if (full) {
@@ -803,16 +816,25 @@ async function runBackgroundScanner() {
   if (!TELEGRAM_TOKEN) return;
   
   const minScore = parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7;
-  const interval = '1h'; // Default signal interval
+  const interval = process.env.TRADING_TIMEFRAME || '1h';
+  const maxOpen = parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 5;
   const batchSize = 10;
 
-  console.log(`\n[cron-scan] Memulai pemindaian sinyal otomatis untuk ${WATCHLIST.length} koin...`);
+  console.log(`\n[cron-scan] Memulai pemindaian (${interval}) untuk ${WATCHLIST.length} koin...`);
   
   try {
     await ensureExchangeAvailable();
   } catch (error) {
     console.error(`[cron-scan] Koneksi ke bursa gagal, scan dibatalkan.`);
     return;
+  }
+
+  // Cek posisi terbuka asli di bursa
+  let currentOpenPositions = 0;
+  if (process.env.TRADING_ENABLED === 'true') {
+     const positions = await getBinancePositions();
+     currentOpenPositions = positions.length;
+     console.log(`[trade] Posisi terbuka saat ini: ${currentOpenPositions}/${maxOpen}`);
   }
 
   const activeTrades = loadActiveTrades();
@@ -837,8 +859,11 @@ async function runBackgroundScanner() {
             console.log(`[telegram] Sinyal Baru: ${item.symbol} (${currentType})`);
             
             // 🔥 EKSEKUSI AUTO-TRADE JIKA DIAKTIFKAN
-            if (process.env.TRADING_ENABLED === 'true') {
+            if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
               executeBinanceTrade(item);
+              currentOpenPositions++;
+            } else if (currentOpenPositions >= maxOpen) {
+              console.log(`[trade] Skip ${item.symbol}: Limit posisi maksimal (${maxOpen}) tercapai.`);
             }
           } else {
             console.log(`[tracker] Update: ${item.symbol} tetap ${currentType}, notif diabaikan (anti-spam).`);
@@ -971,9 +996,11 @@ app.get('/api/health', (_, res) => {
     status: 'ok',
     timestamp: Date.now(),
     pairs: WATCHLIST.length,
-    version: '2.1',
+    version: '2.2',
     baseURL: getActiveBaseUrl(),
     configuredBaseURLs: BINANCE_BASE_URLS,
+    tradingTimeframe: process.env.TRADING_TIMEFRAME || '1h',
+    tradingEnabled: process.env.TRADING_ENABLED === 'true'
   });
 });
 
