@@ -186,6 +186,9 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:12px">
+      <span id="config-summary" style="font-size:10px;color:var(--tx3);display:flex;gap:10px;margin-left:15px;opacity:0.8">
+        <!-- Will be filled by JS -->
+      </span>
       <span style="font-size:11px;color:var(--tx3);border-left:1px solid var(--br);padding-left:12px;margin-left:4px;display:flex;align-items:center;gap:6px">
         <span id="scalper-tag" style="display:none;background:var(--rd);color:var(--r);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid var(--rb)">SCALPER MODE</span>
         <span id="live-tag" style="display:none;background:var(--gb);color:var(--g);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid var(--g);animation:pulse 2s infinite">📡 LIVE</span>
@@ -716,6 +719,17 @@ async function checkApiStatus() {
         liveTag.style.display = 'inline-block';
       } else {
         liveTag.style.display = 'none';
+      }
+      
+      // Update Config Summary UI
+      if (data.config) {
+        const cfg = data.config;
+        document.getElementById('config-summary').innerHTML = `
+          <span>SC: ${cfg.minScore}+</span>
+          <span>CF: ${cfg.minConf}%+</span>
+          <span>POS: ${data.positionsCount}/${cfg.maxOpen}</span>
+          <span style="color:${cfg.tradingEnabled ? 'var(--g)' : 'var(--r)'}">${cfg.tradingEnabled ? 'AUTO: ON' : 'AUTO: OFF'}</span>
+        `;
       }
       
       const atEnv = document.getElementById('at-env');

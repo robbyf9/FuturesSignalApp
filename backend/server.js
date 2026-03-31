@@ -1264,7 +1264,13 @@ app.get('/api/test-api', async (req, res) => {
       environment: USE_TESTNET ? 'Testnet' : 'Live',
       wsStatus,
       balance: balance ? parseFloat(balance.walletBalance).toFixed(2) : '0',
-      positionsCount: account.positions.filter(p => parseFloat(p.positionAmt) !== 0).length
+      positionsCount: account.positions.filter(p => parseFloat(p.positionAmt) !== 0).length,
+      config: {
+        minScore: parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7,
+        minConf: parseInt(process.env.AUTO_TRADE_MIN_CONFIDENCE, 10) || 80,
+        maxOpen: parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 5,
+        tradingEnabled: process.env.TRADING_ENABLED === 'true'
+      }
     });
   } catch (err) {
     const msg = err.response?.data?.msg || err.message;
