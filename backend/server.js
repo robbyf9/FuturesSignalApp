@@ -42,7 +42,15 @@ const BINANCE_BASE_URLS = parseBaseUrls();
 let activeBaseIndex = 0;
 
 function getActiveBaseUrl() {
-  return BINANCE_BASE_URLS[activeBaseIndex] || DEFAULT_BINANCE_BASE_URL;
+  const USE_TESTNET = process.env.USE_BINANCE_TESTNET === 'true';
+  const defaultTestnet = 'https://fapi-testnet.binance.com';
+  const defaultMainnet = 'https://fapi.binance.com';
+
+  if (BINANCE_BASE_URLS.length > 0) {
+    return BINANCE_BASE_URLS[activeBaseIndex];
+  }
+  
+  return USE_TESTNET ? defaultTestnet : defaultMainnet;
 }
 
 // Global Live State (Memory Cache)
@@ -172,9 +180,28 @@ const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  config.baseURL = config.baseURL || getActiveBaseUrl();
+  config.baseURL = getActiveBaseUrl();
   return config;
 });
+
+// Helper: Safe GET with Auto-Rotation & Retries
+async function safeGet(url, params = {}, retries = 2) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await api.get(url, { params });
+    } catch (error) {
+      const status = error.response?.status;
+      // Jika Rate Limit (429) atau Service Unavailable (503), putar URL dan coba lagi
+      if ((status === 429 || status === 503 || !error.response) && i < retries) {
+        console.warn(`[api] Rotating URL after error ${status || 'network'}...`);
+        rotateBaseUrl();
+        await sleep(500 * (i + 1)); // Jeda sedikit sebelum coba lagi
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 // -------------------------------------------------------------
 // KONFIGURASI & AUTHENTICATION BINANCE (TESTNET/LIVE)
@@ -737,11 +764,12 @@ function generateSignal(indicators, price, fundingRate, interval = '1h') {
 }
 
 async function analyzePair(symbol, interval = '1h', full = false) {
-  const [klinesRes, tickerRes, fundingRes] = await Promise.all([
-    api.get('/fapi/v1/klines', { params: { symbol, interval, limit: full ? 200 : 100 } }),
-    api.get('/fapi/v1/ticker/24hr', { params: { symbol } }),
-    api.get('/fapi/v1/premiumIndex', { params: { symbol } }),
-  ]);
+  try {
+    const [klinesRes, tickerRes, fundingRes] = await Promise.all([
+      safeGet('/fapi/v1/klines', { symbol, interval, limit: full ? 200 : 100 }),
+      safeGet('/fapi/v1/ticker/24hr', { symbol }),
+      safeGet('/fapi/v1/premiumIndex', { symbol }),
+    ]);
 
   const klines = klinesRes.data;
   const ticker = tickerRes.data;
@@ -805,13 +833,14 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     }
   }
 
-  return result;
+  } catch (err) {
+    console.error(`[analyze] Error for ${symbol}:`, err.message);
+    throw err;
+  }
 }
 
 async function ensureExchangeAvailable() {
-  await api.get('/fapi/v1/ping', {
-    timeout: Math.min(REQUEST_TIMEOUT_MS, 5000),
-  });
+  await safeGet('/fapi/v1/ping');
 }
 
 // -------------------------------------------------------------
