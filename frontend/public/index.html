@@ -164,6 +164,9 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
     <div class="nav-item" id="nav-funding" onclick="showView('funding')">
       <span>◎</span> Funding Rates
     </div>
+    <div class="nav-item" id="nav-active-trades" onclick="showView('active-trades')">
+      <span>⊡</span> Active Trades
+    </div>
   </nav>
   <div class="sb-label">TOP SIGNALS</div>
   <div id="sb-pairs"></div>
@@ -253,6 +256,22 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
       </div>
     </div>
 
+    <!-- ── ACTIVE TRADES VIEW ── -->
+    <div id="view-active-trades" style="display:none">
+      <div class="sc-card">
+        <div class="sc-hd">
+          <span class="ct">ACTIVE TRADES — POSISI YANG SEDANG DIPANTAU</span>
+          <button class="f-btn" onclick="loadActiveTrades()">⟳ REFRESH</button>
+        </div>
+        <div class="sc-overflow">
+          <div class="th" style="grid-template-columns:130px 90px 100px 100px 90px 180px 120px">
+            <span>PAIR</span><span>TIPE</span><span>ENTRY</span><span>CURRENT</span><span>PnL%</span><span>TARGETS</span><span>WAKTU</span>
+          </div>
+          <div id="at-body"><div class="ld"><span>Memuat posisi...</span></div></div>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /content -->
 </main>
 </div>
@@ -267,14 +286,22 @@ let selPair = null;
 
 // ─── View ─────────────────────────────────────────────────────────────────────
 function showView(v) {
-  ['scanner','opportunities','funding'].forEach(x => {
-    document.getElementById('view-'+x).style.display = x===v?'block':'none';
-    document.getElementById('nav-'+x).classList.toggle('active', x===v);
+  ['scanner','opportunities','funding','active-trades'].forEach(x => {
+    const el = document.getElementById('view-'+x);
+    if(el) el.style.display = x===v?'block':'none';
+    const nav = document.getElementById('nav-'+x);
+    if(nav) nav.classList.toggle('active', x===v);
   });
-  const titles = {scanner:'Market Scanner',opportunities:'Top Opportunities',funding:'Funding Rates'};
+  const titles = {
+    scanner:'Market Scanner',
+    opportunities:'Top Opportunities',
+    funding:'Funding Rates',
+    'active-trades':'Active Trades Monitor'
+  };
   document.getElementById('page-title').textContent = titles[v];
   if (v==='funding') loadFunding();
   if (v==='opportunities') renderOpportunities();
+  if (v==='active-trades') loadActiveTrades();
 }
 
 // ─── Interval ─────────────────────────────────────────────────────────────────
@@ -611,6 +638,52 @@ async function loadFunding() {
     }).join('');
   } catch(e) {
     document.getElementById('fr-body').innerHTML = `<div class="ld" style="color:var(--r)">Error: ${e.message}</div>`;
+  }
+}
+
+// ─── Active Trades ────────────────────────────────────────────────────────────
+async function loadActiveTrades() {
+  const body = document.getElementById('at-body');
+  body.innerHTML = `<div class="ld"><div class="sp"></div><span>Mengambil data trade...</span></div>`;
+  
+  try {
+    const res = await fetch(`${API}/active-trades`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    
+    if (data.length === 0) {
+      body.innerHTML = `<div class="ld">Belum ada posisi aktif yang dipantau</div>`;
+      return;
+    }
+    
+    body.innerHTML = data.map(t => {
+      const pnlCls = t.pnl >= 0 ? 'up' : 'dn';
+      const date = new Date(t.timestamp).toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'});
+      const targets = [
+        {l:'TP1', v:t.tp1, h:t.hitTp1},
+        {l:'TP2', v:t.tp2, h:t.hitTp2},
+        {l:'TP3', v:t.tp3, h:false},
+        {l:'SL', v:t.sl, h:false, c:'var(--r)'}
+      ];
+
+      return `<div class="tr" style="grid-template-columns:130px 90px 100px 100px 90px 180px 120px" onclick="loadDetail('${t.symbol}');showView('scanner')">
+        <span style="font-weight:600">${t.symbol.replace('USDT','')}</span>
+        <span><span class="pill ${t.type.toLowerCase()}">${t.type}</span></span>
+        <span>$${fmtP(t.entry)}</span>
+        <span>$${fmtP(t.currentPrice)}</span>
+        <span class="${pnlCls}" style="font-weight:600">${t.pnl > 0 ? '+' : ''}${t.pnl}%</span>
+        <div style="display:flex; gap:4px; flex-wrap:wrap">
+          ${targets.map(tg => `
+            <span style="font-size:9px; padding:1px 4px; border-radius:3px; background:${tg.h ? 'var(--gb)' : 'var(--bg4)'}; color:${tg.h ? 'var(--g)' : (tg.c || 'var(--tx3)')}; border:1px solid ${tg.h ? 'var(--g)' : 'var(--br)'}">
+              ${tg.l}
+            </span>
+          `).join('')}
+        </div>
+        <span style="color:var(--tx3)">${date}</span>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    body.innerHTML = `<div class="ld" style="color:var(--r)">Error: ${e.message}</div>`;
   }
 }
 

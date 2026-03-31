@@ -860,11 +860,15 @@ async function monitorActiveTrades() {
       if (!currentPrice) continue;
 
       const isLong = trade.type === 'LONG';
+      const pnl = isLong 
+        ? ((currentPrice - trade.entry) / trade.entry) * 100 
+        : ((trade.entry - currentPrice) / trade.entry) * 100;
+      const pnlStr = pnl.toFixed(2) + '%';
 
       // 1. Cek SL
       const hitSl = isLong ? (currentPrice <= trade.sl) : (currentPrice >= trade.sl);
       if (hitSl) {
-        await sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}`);
+        await sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
         delete activeTrades[sym];
         modified = true;
         continue;
@@ -873,7 +877,7 @@ async function monitorActiveTrades() {
       // 2. Cek TP3 (Full Close)
       const hitTp3 = isLong ? (currentPrice >= trade.tp3) : (currentPrice <= trade.tp3);
       if (hitTp3) {
-        await sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nHarga Tersentuh: ${currentPrice}\n\n🎉 Selamat, Trade Selesai! 💰`);
+        await sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}\n\n🎉 Selamat, Trade Selesai! 💰`);
         delete activeTrades[sym];
         modified = true;
         continue;
@@ -886,7 +890,7 @@ async function monitorActiveTrades() {
           trade.hitTp2 = true;
           trade.hitTp1 = true;
           modified = true;
-          await sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nSisa Target: TP3 (${trade.tp3})`);
+          await sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nPnL Saat Ini: ${pnlStr}\nSisa Target: TP3 (${trade.tp3})`);
         }
       }
 
@@ -896,7 +900,7 @@ async function monitorActiveTrades() {
         if (hitTp1) {
           trade.hitTp1 = true;
           modified = true;
-          await sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nSisa Target: TP2 (${trade.tp2}), TP3 (${trade.tp3})`);
+          await sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nPnL Saat Ini: ${pnlStr}\nSisa Target: TP2 (${trade.tp2}), TP3 (${trade.tp3})`);
         }
       }
     }
@@ -956,6 +960,39 @@ app.get('/api/cron-run', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to trigger scanner', details: error.message });
+  }
+});
+
+app.get('/api/active-trades', async (req, res) => {
+  try {
+    const trades = loadActiveTrades();
+    const symbols = Object.keys(trades);
+    
+    if (symbols.length === 0) return res.json([]);
+    
+    // Ambil harga terkini untuk menghitung profit berjalan di frontend
+    const priceRes = await api.get('/fapi/v1/ticker/price');
+    const priceMap = {};
+    priceRes.data.forEach(p => { priceMap[p.symbol] = parseFloat(p.price); });
+    
+    const results = symbols.map(sym => {
+      const t = trades[sym];
+      const current = priceMap[sym] || t.entry;
+      const isLong = t.type === 'LONG';
+      const pnl = isLong 
+        ? ((current - t.entry) / t.entry) * 100 
+        : ((t.entry - current) / t.entry) * 100;
+        
+      return { 
+        ...t, 
+        currentPrice: current, 
+        pnl: parseFloat(pnl.toFixed(2)) 
+      };
+    });
+    
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: 'Gagal ambil data trade aktif' });
   }
 });
 
