@@ -1270,12 +1270,50 @@ app.get('/api/health', (_, res) => {
     status: 'ok',
     timestamp: Date.now(),
     pairs: WATCHLIST.length,
-    version: '2.5',
+    version: '2.6-DEBUG',
     baseURL: getActiveBaseUrl(),
     configuredBaseURLs: BINANCE_BASE_URLS,
     tradingTimeframe: process.env.TRADING_TIMEFRAME || '1h',
     tradingEnabled: process.env.TRADING_ENABLED === 'true'
   });
+});
+
+app.get('/api/debug-connection', async (req, res) => {
+  const symbol = 'BTCUSDT';
+  const target = getActiveBaseUrl();
+  const results = {
+    target,
+    testnet: process.env.USE_BINANCE_TESTNET === 'true',
+    steps: []
+  };
+
+  try {
+    results.steps.push({ name: 'DNS/Ping Test', status: 'trying' });
+    await api.get('/fapi/v1/ping');
+    results.steps[0].status = 'OK';
+    
+    results.steps.push({ name: 'Klines Test', status: 'trying' });
+    const kRes = await api.get('/fapi/v1/klines', { params: { symbol, interval: '1h', limit: 1 } });
+    results.steps[1].status = 'OK';
+    results.data_sample = kRes.data[0];
+    
+    res.json({ success: true, results });
+  } catch (err) {
+    const norm = normalizeAxiosError(err);
+    res.status(500).json({
+      success: false,
+      results,
+      error_code: err.code,
+      error_status: err.response?.status,
+      full_message: norm.message,
+      axios_config: {
+        url: err.config?.url,
+        method: err.config?.method,
+        baseURL: err.config?.baseURL,
+        headers: err.config?.headers
+      }
+    });
+  }
 });
 
 app.get('/api/trade-history', (req, res) => {
