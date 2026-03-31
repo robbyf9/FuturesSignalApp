@@ -32,7 +32,7 @@ function parseBaseUrls() {
     new Set(
       raw
         .split(',')
-        .map((value) => value.trim())
+        .map((value) => value.trim().replace(/\/+$/, ''))
         .filter(Boolean)
     )
   );
@@ -165,14 +165,16 @@ async function updateWatchlist() {
       .filter((item) => {
         const symbol = item.symbol;
         if (!symbol.endsWith('USDT') || symbol.includes('_')) return false;
-        // Hanya koin dengan volume 24 jam > 30 juta USDT (keseimbangan stabilitas & jumlah koin)
-        return parseFloat(item.quoteVolume) >= 30000000;
+        // Gunakan threshold volume dari .env (default list minimal 30jt USDT)
+        const minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT) || 30000000;
+        return parseFloat(item.quoteVolume) >= minVol;
       })
       .map((item) => item.symbol);
 
     if (eligible.length > 0) {
       WATCHLIST = eligible;
       console.log(`[system] Watchlist diperbarui otomatis: ${WATCHLIST.length} koin siap discan.`);
+      console.log(`[system] Koin: ${WATCHLIST.slice(0, 10).join(', ')}${WATCHLIST.length > 10 ? '...' : ''}`);
     }
   } catch (error) {
     console.error('[system] Gagal memperbarui watchlist otomatis:', error.message);
@@ -1439,58 +1441,37 @@ app.get('/api/test-api', async (req, res) => {
 });
 
 app.get('/api/scanner', async (req, res) => {
+  const startedAt = Date.now();
   const interval = req.query.interval || '1h';
   const minScore = parseInt(req.query.minScore, 10) || 0; 
-  const batchSize = 5;
-  const startedAt = Date.now();
   const results = [];
   const failures = [];
   const failureDetails = [];
 
-  console.log(`\n[scan] ${WATCHLIST.length} pairs | interval=${interval} | baseURL=${getActiveBaseUrl()}`);
+  console.log(`\n[scan] STEALTH MODE (${WATCHLIST.length} pairs) | interval=${interval}`);
 
-  try {
-    await ensureExchangeAvailable();
-  } catch (error) {
-    const normalized = normalizeAxiosError(error);
-    console.error(`[scan] Exchange connectivity check failed: ${normalized.message}`);
-    return res.status(getErrorStatusCode(normalized)).json({
-      error: normalized.message,
-      baseURL: getActiveBaseUrl(),
-      configuredBaseURLs: BINANCE_BASE_URLS,
-      interval,
-    });
-  }
-
-  for (let i = 0; i < WATCHLIST.length; i += batchSize) {
-    const batch = WATCHLIST.slice(i, i + batchSize);
-    const settled = await Promise.allSettled(
-      batch.map((symbol) => analyzePair(symbol, interval, false))
-    );
-
-    settled.forEach((result, index) => {
-      const symbol = batch[index];
-
-      if (result.status === 'fulfilled') {
-        results.push(result.value);
-        console.log(`  ok ${symbol} -> ${result.value.signal.signal} (${result.value.signal.score})`);
-        return;
+  for (const symbol of WATCHLIST) {
+    try {
+      const item = await analyzePair(symbol, interval, false);
+      
+      if (Math.abs(item.signal.score) >= minScore) {
+        results.push(item);
       }
-
-      const normalized = normalizeAxiosError(result.reason);
+      
+      console.log(`  ok ${symbol} -> ${item.signal.signal} (${item.signal.score})`);
+    } catch (error) {
+      const normalized = normalizeAxiosError(error);
       failures.push(symbol);
       failureDetails.push({ symbol, error: normalized?.message || 'Unknown error' });
       
-      // Jika terdeteksi Rate Limit (429), kurangi kecepatan secara drastis
       if (normalized.status === 429) {
-        console.warn(`[scan] API Rate Limit! Menaikkan jeda pemindaian...`);
+        console.warn(`[scan] Stealth Speed Limit! Menambah jeda cooldown...`);
+        await sleep(3000); // Tunggu lebih lama jika terdeteksi 429
       }
-    });
-
-    // Perlama jeda antar batch dari 200ms ke 1000ms untuk amankan IP Alwaysdata
-    if (i + batchSize < WATCHLIST.length) {
-      await sleep(1000); 
     }
+    
+    // Jeda antar koin 1 detik (Mode Lambat tapi Selamat)
+    await sleep(1000);
   }
 
   const filtered = results
