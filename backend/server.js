@@ -10,6 +10,7 @@ const path = require('path');
 const dotenv = require('dotenv');
 const cron = require('node-cron');
 const fs = require('fs');
+const crypto = require('crypto');
 
 dotenv.config();
 
@@ -166,6 +167,143 @@ api.interceptors.request.use((config) => {
   config.baseURL = config.baseURL || getActiveBaseUrl();
   return config;
 });
+
+// -------------------------------------------------------------
+// KONFIGURASI & AUTHENTICATION BINANCE (TESTNET/LIVE)
+// -------------------------------------------------------------
+const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
+const BINANCE_SECRET_KEY = process.env.BINANCE_SECRET_KEY;
+const USE_TESTNET = process.env.USE_BINANCE_TESTNET === 'true';
+const TESTNET_BASE_URL = 'https://testnet.binancefuture.com';
+
+const tradingApi = axios.create({
+  baseURL: USE_TESTNET ? TESTNET_BASE_URL : getActiveBaseUrl(),
+  timeout: 10000,
+  headers: {
+    'X-MBX-APIKEY': BINANCE_API_KEY,
+    'Content-Type': 'application/x-www-form-urlencoded'
+  }
+});
+
+function signRequest(params) {
+  const timestamp = Date.now();
+  const queryString = Object.keys(params)
+    .map(key => `${key}=${encodeURIComponent(params[key])}`)
+    .join('&') + `&timestamp=${timestamp}`;
+  
+  const signature = crypto
+    .createHmac('sha256', BINANCE_SECRET_KEY)
+    .update(queryString)
+    .digest('hex');
+    
+  return `${queryString}&signature=${signature}`;
+}
+
+let exchangeInfoCache = null;
+
+async function getExchangeInfo() {
+  if (exchangeInfoCache) return exchangeInfoCache;
+  try {
+    const res = await api.get('/fapi/v1/exchangeInfo');
+    exchangeInfoCache = res.data;
+    return exchangeInfoCache;
+  } catch (err) {
+    console.error('[binance] Gagal ambil Exchange Info:', err.message);
+    return null;
+  }
+}
+
+function getSymbolPrecision(symbol, info) {
+  if (!info) return { price: 2, quantity: 3 };
+  const sym = info.symbols.find(s => s.symbol === symbol);
+  if (!sym) return { price: 2, quantity: 3 };
+  
+  const priceFilter = sym.filters.find(f => f.filterType === 'PRICE_FILTER');
+  const lotFilter = sym.filters.find(f => f.filterType === 'LOT_SIZE');
+  
+  const tickSize = priceFilter ? parseFloat(priceFilter.tickSize) : 0.01;
+  const stepSize = lotFilter ? parseFloat(lotFilter.stepSize) : 0.001;
+  
+  return {
+    price: Math.max(0, Math.round(-Math.log10(tickSize))),
+    quantity: Math.max(0, Math.round(-Math.log10(stepSize)))
+  };
+}
+
+async function executeBinanceTrade(signalData) {
+  if (process.env.TRADING_ENABLED !== 'true' || !BINANCE_API_KEY || !BINANCE_SECRET_KEY) {
+    return;
+  }
+
+  const { symbol, signal, price } = signalData;
+  const side = signal.signal.includes('LONG') ? 'BUY' : 'SELL';
+  const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
+  
+  const usdtAmount = parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
+  const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
+
+  console.log(`[trade] Mengeksekusi order ${symbol} (${side}) senilai ${usdtAmount} USDT...`);
+
+  try {
+    const info = await getExchangeInfo();
+    const precision = getSymbolPrecision(symbol, info);
+    
+    // 1. Set Leverage
+    const levParams = signRequest({ symbol, leverage });
+    await tradingApi.post('/fapi/v1/leverage', levParams);
+
+    // 2. Hitung Quantity
+    const quantity = (usdtAmount * leverage) / price;
+    const formattedQty = quantity.toFixed(precision.quantity);
+    
+    // 3. Main Order (Market)
+    const orderParams = signRequest({
+      symbol,
+      side,
+      type: 'MARKET',
+      quantity: formattedQty
+    });
+    
+    const mainOrder = await tradingApi.post('/fapi/v1/order', orderParams);
+    console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId}`);
+
+    // 4. TP & SL (Hanya jika sinyal memberikan level)
+    if (signal.levels) {
+      const tpPrice = parseFloat(signal.levels.tp2).toFixed(precision.price);
+      const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
+
+      // TP Order (Take Profit Market)
+      const tpParams = signRequest({
+        symbol,
+        side: oppositeSide,
+        type: 'TAKE_PROFIT_MARKET',
+        stopPrice: tpPrice,
+        closePosition: 'true',
+        workingType: 'MARK_PRICE'
+      });
+      await tradingApi.post('/fapi/v1/order', tpParams);
+
+      // SL Order (Stop Market)
+      const slParams = signRequest({
+        symbol,
+        side: oppositeSide,
+        type: 'STOP_MARKET',
+        stopPrice: slPrice,
+        closePosition: 'true',
+        workingType: 'MARK_PRICE'
+      });
+      await tradingApi.post('/fapi/v1/order', slParams);
+      
+      console.log(`[trade] TP/SL Terpasang: TP2 @ ${tpPrice}, SL @ ${slPrice}`);
+      await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi di Binance Testnet beres!_`);
+    }
+
+  } catch (err) {
+    const msg = err.response?.data?.msg || err.message;
+    console.error(`[trade] Gagal mengeksekusi order ${symbol}:`, msg);
+    await sendTelegramMessage(`⚠️ *AUTO-TRADE FAILED* ⚠️\n\nKoin: ${symbol}\nError: ${msg}`);
+  }
+}
 
 api.interceptors.response.use(
   (response) => response,
@@ -661,6 +799,11 @@ async function runBackgroundScanner() {
           if (!existing || existing.type !== currentType) {
             await sendToTelegram(item);
             console.log(`[telegram] Sinyal Baru: ${item.symbol} (${currentType})`);
+            
+            // 🔥 EKSEKUSI AUTO-TRADE JIKA DIAKTIFKAN
+            if (process.env.TRADING_ENABLED === 'true') {
+              executeBinanceTrade(item);
+            }
           } else {
             console.log(`[tracker] Update: ${item.symbol} tetap ${currentType}, notif diabaikan (anti-spam).`);
           }
