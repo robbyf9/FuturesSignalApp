@@ -46,11 +46,15 @@ function getActiveBaseUrl() {
   const defaultTestnet = 'https://fapi-testnet.binance.com';
   const defaultMainnet = 'https://fapi.binance.com';
 
+  // Jika mode TESTNET aktif, jangan gunakan BINANCE_BASE_URLS dari .env (karena biasanya isinya mainnet)
+  // Kecuali user memang menset URL khusus testnet di sana.
+  if (USE_TESTNET) return defaultTestnet;
+
   if (BINANCE_BASE_URLS.length > 0) {
     return BINANCE_BASE_URLS[activeBaseIndex];
   }
   
-  return USE_TESTNET ? defaultTestnet : defaultMainnet;
+  return defaultMainnet;
 }
 
 // Global Live State (Memory Cache)
@@ -966,7 +970,7 @@ async function runBackgroundScanner() {
   const autoTradeMinConf = parseInt(process.env.AUTO_TRADE_MIN_CONFIDENCE, 10) || 80;
   const interval = process.env.TRADING_TIMEFRAME || '1h';
   const maxOpen = parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 5;
-  const batchSize = 10;
+  const batchSize = 5; // Perkecil dari 10 ke 5 agar tidak memicu 429
 
   console.log(`\n[cron-scan] Memulai pemindaian (${interval}) untuk ${WATCHLIST.length} koin...`);
   
@@ -1430,7 +1434,7 @@ app.get('/api/test-api', async (req, res) => {
 app.get('/api/scanner', async (req, res) => {
   const interval = req.query.interval || '1h';
   const minScore = parseInt(req.query.minScore, 10) || 5; // Default ubah dari 0 ke 5, agar yg tampil berpotensi saja
-  const batchSize = 10;
+  const batchSize = 5;
   const startedAt = Date.now();
   const results = [];
   const failures = [];
