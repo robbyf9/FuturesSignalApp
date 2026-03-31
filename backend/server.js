@@ -230,6 +230,39 @@ function getSymbolPrecision(symbol, info) {
   };
 }
 
+// -------------------------------------------------------------
+// PRIVATE BINANCE FETCHERS (SIGNED)
+// -------------------------------------------------------------
+async function fetchSigned(method, endpoint, params = {}) {
+  const queryString = signRequest(params);
+  const config = {
+    method,
+    url: `${endpoint}?${queryString}`
+  };
+  const res = await tradingApi(config);
+  return res.data;
+}
+
+async function getBinancePositions() {
+  try {
+    // Filter hanya posisi yang memiliki jumlah koin (aktif)
+    const positions = await fetchSigned('GET', '/fapi/v2/positionRisk');
+    return positions.filter(p => parseFloat(p.positionAmt) !== 0);
+  } catch (err) {
+    console.error('[binance] Gagal ambil posisi:', err.response?.data?.msg || err.message);
+    return [];
+  }
+}
+
+async function getBinanceOpenOrders() {
+  try {
+    return await fetchSigned('GET', '/fapi/v1/openOrders');
+  } catch (err) {
+    console.error('[binance] Gagal ambil open orders:', err.response?.data?.msg || err.message);
+    return [];
+  }
+}
+
 async function executeBinanceTrade(signalData) {
   if (process.env.TRADING_ENABLED !== 'true' || !BINANCE_API_KEY || !BINANCE_SECRET_KEY) {
     return;
@@ -965,34 +998,64 @@ app.get('/api/cron-run', async (req, res) => {
 
 app.get('/api/active-trades', async (req, res) => {
   try {
-    const trades = loadActiveTrades();
-    const symbols = Object.keys(trades);
+    const [positions, openOrders] = await Promise.all([
+      getBinancePositions(),
+      getBinanceOpenOrders()
+    ]);
     
-    if (symbols.length === 0) return res.json([]);
+    if (positions.length === 0) return res.json([]);
     
-    // Ambil harga terkini untuk menghitung profit berjalan di frontend
-    const priceRes = await api.get('/fapi/v1/ticker/price');
-    const priceMap = {};
-    priceRes.data.forEach(p => { priceMap[p.symbol] = parseFloat(p.price); });
-    
-    const results = symbols.map(sym => {
-      const t = trades[sym];
-      const current = priceMap[sym] || t.entry;
-      const isLong = t.type === 'LONG';
-      const pnl = isLong 
-        ? ((current - t.entry) / t.entry) * 100 
-        : ((t.entry - current) / t.entry) * 100;
+    const results = positions.map(pos => {
+      const sym = pos.symbol;
+      const amount = parseFloat(pos.positionAmt);
+      const entry = parseFloat(pos.entryPrice);
+      const mark = parseFloat(pos.markPrice);
+      const isLong = amount > 0;
+      const pnl = parseFloat(pos.unRealizedProfit);
+      const pnlPercent = isLong 
+        ? ((mark - entry) / entry) * 100 
+        : ((entry - mark) / entry) * 100;
         
-      return { 
-        ...t, 
-        currentPrice: current, 
-        pnl: parseFloat(pnl.toFixed(2)) 
+      // Cari TP/SL dari open orders koin ini
+      const coinOrders = openOrders.filter(o => o.symbol === sym);
+      const tpOrder = coinOrders.find(o => o.type === 'TAKE_PROFIT_MARKET');
+      const slOrder = coinOrders.find(o => o.type === 'STOP_MARKET');
+
+      return {
+        symbol: sym,
+        type: isLong ? 'LONG' : 'SHORT',
+        entry,
+        currentPrice: mark,
+        pnl: parseFloat(pnl.toFixed(2)),
+        pnlPercent: parseFloat(pnlPercent.toFixed(2)),
+        margin: parseFloat(pos.isolatedWallet || 0),
+        leverage: pos.leverage,
+        tp: tpOrder ? parseFloat(tpOrder.stopPrice) : null,
+        sl: slOrder ? parseFloat(slOrder.stopPrice) : null,
+        timestamp: Date.now()
       };
     });
     
     res.json(results);
   } catch (err) {
-    res.status(500).json({ error: 'Gagal ambil data trade aktif' });
+    console.error('[api] Gagal sinkronisasi data bursa:', err.message);
+    res.status(500).json({ error: 'Gagal sinkronisasi data posisi riil' });
+  }
+});
+
+app.get('/api/test-api', async (req, res) => {
+  try {
+    const account = await fetchSigned('GET', '/fapi/v2/account');
+    const balance = account.assets.find(a => a.asset === 'USDT');
+    res.json({
+      status: 'connected',
+      environment: USE_TESTNET ? 'Testnet' : 'Live',
+      balance: balance ? parseFloat(balance.walletBalance).toFixed(2) : '0',
+      positionsCount: account.positions.filter(p => parseFloat(p.positionAmt) !== 0).length
+    });
+  } catch (err) {
+    const msg = err.response?.data?.msg || err.message;
+    res.status(401).json({ status: 'error', message: msg });
   }
 });
 

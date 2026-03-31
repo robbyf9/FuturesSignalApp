@@ -186,9 +186,9 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
       </div>
     </div>
     <div style="display:flex;align-items:center;gap:12px">
-      <span style="font-size:11px;color:var(--tx3)">
-        <span class="sdot" id="sdot"></span>
-        <span id="slabel">Siap</span>
+      <span style="font-size:11px;color:var(--tx3);border-left:1px solid var(--br);padding-left:12px;margin-left:4px">
+        <span id="api-status-dot" class="sdot"></span>
+        <span id="api-status-text" onclick="checkApiStatus()" style="cursor:pointer">Cek API...</span>
       </span>
       <button class="scan-btn" id="scan-btn" onclick="runScan()">⟳ SCAN SEMUA</button>
     </div>
@@ -260,12 +260,15 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
     <div id="view-active-trades" style="display:none">
       <div class="sc-card">
         <div class="sc-hd">
-          <span class="ct">ACTIVE TRADES — POSISI YANG SEDANG DIPANTAU</span>
-          <button class="f-btn" onclick="loadActiveTrades()">⟳ REFRESH</button>
+          <span class="ct">ACTIVE POSITIONS — DATA RIEL DARI BURSA <span id="at-env" style="color:var(--ac);font-size:9px;margin-left:8px"></span></span>
+          <div style="display:flex;gap:8px">
+            <span id="at-balance" style="font-size:11px;color:var(--g);display:flex;align-items:center"></span>
+            <button class="f-btn" onclick="loadActiveTrades()">⟳ REFRESH</button>
+          </div>
         </div>
         <div class="sc-overflow">
-          <div class="th" style="grid-template-columns:130px 90px 100px 100px 90px 180px 120px">
-            <span>PAIR</span><span>TIPE</span><span>ENTRY</span><span>CURRENT</span><span>PnL%</span><span>TARGETS</span><span>WAKTU</span>
+          <div class="th" style="grid-template-columns:110px 80px 100px 100px 70px 130px 140px 100px">
+            <span>PAIR</span><span>SIDE</span><span>ENTRY</span><span>MARK</span><span>LEV</span><span>UNREALIZED PnL</span><span>TARGETS</span><span>WAKTU</span>
           </div>
           <div id="at-body"><div class="ld"><span>Memuat posisi...</span></div></div>
         </div>
@@ -644,46 +647,80 @@ async function loadFunding() {
 // ─── Active Trades ────────────────────────────────────────────────────────────
 async function loadActiveTrades() {
   const body = document.getElementById('at-body');
-  body.innerHTML = `<div class="ld"><div class="sp"></div><span>Mengambil data trade...</span></div>`;
+  body.innerHTML = `<div class="ld"><div class="sp"></div><span>Sinkronisasi dengan Binance...</span></div>`;
   
   try {
     const res = await fetch(`${API}/active-trades`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Gagal ambil data bursa`);
     const data = await res.json();
     
-    if (data.length === 0) {
-      body.innerHTML = `<div class="ld">Belum ada posisi aktif yang dipantau</div>`;
+    if (!Array.isArray(data) || data.length === 0) {
+      body.innerHTML = `<div class="ld">Tidak ada posisi terbuka di akun Binance Anda saat ini.</div>`;
       return;
     }
     
     body.innerHTML = data.map(t => {
       const pnlCls = t.pnl >= 0 ? 'up' : 'dn';
       const date = new Date(t.timestamp).toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'});
-      const targets = [
-        {l:'TP1', v:t.tp1, h:t.hitTp1},
-        {l:'TP2', v:t.tp2, h:t.hitTp2},
-        {l:'TP3', v:t.tp3, h:false},
-        {l:'SL', v:t.sl, h:false, c:'var(--r)'}
-      ];
+      
+      const targets = [];
+      if (t.tp) targets.push({l:'TP', v:t.tp, c:'var(--g)'});
+      if (t.sl) targets.push({l:'SL', v:t.sl, c:'var(--r)'});
 
-      return `<div class="tr" style="grid-template-columns:130px 90px 100px 100px 90px 180px 120px" onclick="loadDetail('${t.symbol}');showView('scanner')">
+      return `<div class="tr" style="grid-template-columns:110px 80px 100px 100px 70px 130px 140px 100px" onclick="loadDetail('${t.symbol}');showView('scanner')">
         <span style="font-weight:600">${t.symbol.replace('USDT','')}</span>
         <span><span class="pill ${t.type.toLowerCase()}">${t.type}</span></span>
         <span>$${fmtP(t.entry)}</span>
         <span>$${fmtP(t.currentPrice)}</span>
-        <span class="${pnlCls}" style="font-weight:600">${t.pnl > 0 ? '+' : ''}${t.pnl}%</span>
+        <span style="color:var(--tx3)">${t.leverage}x</span>
+        <div style="display:flex;flex-direction:column">
+          <span class="${pnlCls}" style="font-weight:600;font-size:12px">${t.pnl > 0 ? '+' : ''}${t.pnl} USDT</span>
+          <span class="${pnlCls}" style="font-size:10px">${t.pnlPercent > 0 ? '+' : ''}${t.pnlPercent}%</span>
+        </div>
         <div style="display:flex; gap:4px; flex-wrap:wrap">
-          ${targets.map(tg => `
-            <span style="font-size:9px; padding:1px 4px; border-radius:3px; background:${tg.h ? 'var(--gb)' : 'var(--bg4)'}; color:${tg.h ? 'var(--g)' : (tg.c || 'var(--tx3)')}; border:1px solid ${tg.h ? 'var(--g)' : 'var(--br)'}">
-              ${tg.l}
+          ${targets.length > 0 ? targets.map(tg => `
+            <span style="font-size:9px; padding:2px 5px; border-radius:3px; background:var(--bg4); color:${tg.c}; border:1px solid var(--br)">
+              ${tg.l}: ${fmtP(tg.v)}
             </span>
-          `).join('')}
+          `).join('') : '<span style="color:var(--tx3);font-size:9px">No TP/SL</span>'}
         </div>
         <span style="color:var(--tx3)">${date}</span>
       </div>`;
     }).join('');
+    
+    // Auto-update API Status also
+    checkApiStatus();
   } catch(e) {
-    body.innerHTML = `<div class="ld" style="color:var(--r)">Error: ${e.message}</div>`;
+    body.innerHTML = `<div class="ld" style="color:var(--r)">⚠ Gagal sinkronisasi data riel: ${e.message}</div>`;
+  }
+}
+
+async function checkApiStatus() {
+  const dot = document.getElementById('api-status-dot');
+  const txt = document.getElementById('api-status-text');
+  
+  try {
+    const res = await fetch(`${API}/test-api`);
+    const data = await res.json();
+    
+    if (data.status === 'connected') {
+      dot.className = 'sdot live';
+      txt.textContent = `${data.environment}: $${data.balance}`;
+      txt.style.color = 'var(--g)';
+      
+      const atEnv = document.getElementById('at-env');
+      if (atEnv) atEnv.textContent = `(${data.environment} CONNECTED)`;
+      
+      const atBal = document.getElementById('at-balance');
+      if (atBal) atBal.textContent = `BAL: $${data.balance}`;
+    } else {
+      throw new Error(data.message);
+    }
+  } catch (e) {
+    dot.className = 'sdot error';
+    txt.textContent = 'API Error';
+    txt.style.color = 'var(--r)';
+    console.error('API Test Failed:', e.message);
   }
 }
 
@@ -715,6 +752,7 @@ function fmtP(n) {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   runScan();
+  checkApiStatus();
 });
 </script>
 </body>
