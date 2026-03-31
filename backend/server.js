@@ -11,6 +11,7 @@ const dotenv = require('dotenv');
 const cron = require('node-cron');
 const fs = require('fs');
 const crypto = require('crypto');
+const WebSocket = require('ws');
 
 dotenv.config();
 
@@ -43,6 +44,11 @@ let activeBaseIndex = 0;
 function getActiveBaseUrl() {
   return BINANCE_BASE_URLS[activeBaseIndex] || DEFAULT_BINANCE_BASE_URL;
 }
+
+// Global Live State
+let livePrices = {};
+let wsConnection = null;
+let wsStatus = 'DISCONNECTED';
 
 function rotateBaseUrl() {
   if (BINANCE_BASE_URLS.length <= 1) return false;
@@ -963,92 +969,163 @@ async function runBackgroundScanner() {
   console.log(`[cron-scan] Pemindaian selesai.`);
 }
 
+// -------------------------------------------------------------
+// WEBSOCKET MANAGER (LIVE STREAM)
+// -------------------------------------------------------------
+function initBinanceWebSocket() {
+  const wsUrl = 'wss://fstream.binance.com/ws/!ticker@arr';
+  console.log(`[ws] Menghubungkan ke ${wsUrl}...`);
+
+  wsConnection = new WebSocket(wsUrl);
+
+  wsConnection.on('open', () => {
+    console.log('[ws] Terhubung ke Binance Live Stream (All Tickers)');
+    wsStatus = 'CONNECTED';
+  });
+
+  wsConnection.on('message', (data) => {
+    try {
+      const tickers = JSON.parse(data);
+      if (!Array.isArray(tickers)) return;
+
+      const activeTrades = loadActiveTrades();
+      const activeSymbols = Object.keys(activeTrades);
+      let modified = false;
+
+      tickers.forEach(t => {
+        const symbol = t.s;
+        const currentPrice = parseFloat(t.c);
+        livePrices[symbol] = currentPrice;
+
+        // Jika koin ini ada dalam trade aktif, cek TP/SL seketika (INSTANT)
+        if (activeSymbols.includes(symbol)) {
+          const trade = activeTrades[symbol];
+          const result = checkTradeLevels(trade, currentPrice);
+          if (result.modified) {
+            modified = true;
+          }
+        }
+      });
+
+      if (modified) {
+        saveActiveTrades(activeTrades);
+      }
+    } catch (err) {
+      console.error('[ws] Error pemrosesan data:', err.message);
+    }
+  });
+
+  wsConnection.on('error', (err) => {
+    console.error('[ws] Error koneksi:', err.message);
+    wsStatus = 'ERROR';
+  });
+
+  wsConnection.on('close', () => {
+    console.log('[ws] Koneksi terputus. Menyambung kembali dalam 5 detik...');
+    wsStatus = 'DISCONNECTED';
+    setTimeout(initBinanceWebSocket, 5000);
+  });
+}
+
+/**
+ * Logika pengecekan TP/SL untuk satu koin (Sekali Terdeteksi Langsung Beraksi)
+ */
+function checkTradeLevels(trade, currentPrice) {
+  let changed = false;
+  const isLong = trade.type === 'LONG';
+  const sym = trade.symbol;
+  
+  const pnl = isLong 
+    ? ((currentPrice - trade.entry) / trade.entry) * 100 
+    : ((trade.entry - currentPrice) / trade.entry) * 100;
+  const pnlStr = pnl.toFixed(2) + '%';
+
+  // 1. Cek SL
+  const hitSl = isLong ? (currentPrice <= trade.sl) : (currentPrice >= trade.sl);
+  if (hitSl) {
+    sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
+    const activeTrades = loadActiveTrades();
+    delete activeTrades[sym];
+    saveActiveTrades(activeTrades);
+    return { modified: true };
+  }
+
+  // 2. Cek TP3 (Full Close)
+  const hitTp3 = isLong ? (currentPrice >= trade.tp3) : (currentPrice <= trade.tp3);
+  if (hitTp3) {
+    sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
+    const activeTrades = loadActiveTrades();
+    delete activeTrades[sym];
+    saveActiveTrades(activeTrades);
+    return { modified: true };
+  }
+
+  // 3. Cek TP2
+  if (!trade.hitTp2) {
+    const hitTp2 = isLong ? (currentPrice >= trade.tp2) : (currentPrice <= trade.tp2);
+    if (hitTp2) {
+      trade.hitTp2 = true;
+      trade.hitTp1 = true;
+      changed = true;
+      sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
+    }
+  }
+
+  // 4. Cek TP1 (Memicu SL Plus)
+  if (!trade.hitTp1) {
+    const hitTp1 = isLong ? (currentPrice >= trade.tp1) : (currentPrice <= trade.tp1);
+    if (hitTp1) {
+      trade.hitTp1 = true;
+      changed = true;
+      sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
+      
+      if (!trade.slMoved && process.env.TRADING_ENABLED === 'true') {
+        moveStopLossToBreakEven(sym, trade.entry, trade.type).then(success => {
+          if (success) {
+            const activeTrades = loadActiveTrades();
+            if (activeTrades[sym]) {
+              activeTrades[sym].slMoved = true;
+              activeTrades[sym].sl = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
+              saveActiveTrades(activeTrades);
+            }
+          }
+        });
+      }
+    }
+  }
+
+  return { modified: changed };
+}
+
 async function monitorActiveTrades() {
+  // Masih dipertahankan untuk redundansi atau update UI via REST
   const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   if (!TELEGRAM_TOKEN) return;
 
   const activeTrades = loadActiveTrades();
   const symbols = Object.keys(activeTrades);
-  if (symbols.length === 0) return; // Tidak ada koin yang di-hold
+  if (symbols.length === 0) return;
 
-  try {
-    // API yang sangat ringan, mengambil semua current price futures
-    const response = await api.get('/fapi/v1/ticker/price');
-    const prices = response.data;
-    let modified = false;
+  // Jika WebSocket Down, gunakan polling sebagai fallback
+  if (wsStatus !== 'CONNECTED') {
+    try {
+      const response = await api.get('/fapi/v1/ticker/price');
+      const prices = response.data;
+      let modified = false;
+      const priceMap = {};
+      for (const p of prices) { priceMap[p.symbol] = parseFloat(p.price); }
 
-    // Convert array to map untuk lookup cepat
-    const priceMap = {};
-    for (const p of prices) {
-      priceMap[p.symbol] = parseFloat(p.price);
+      for (const sym of symbols) {
+        const trade = activeTrades[sym];
+        const currentPrice = priceMap[sym];
+        if (!currentPrice) continue;
+        const res = checkTradeLevels(trade, currentPrice);
+        if (res.modified) modified = true;
+      }
+      if (modified) saveActiveTrades(activeTrades);
+    } catch (e) {
+      console.error('[tracker] Fallback monitor error:', e.message);
     }
-
-    for (const sym of symbols) {
-      const trade = activeTrades[sym];
-      const currentPrice = priceMap[sym];
-      if (!currentPrice) continue;
-
-      const isLong = trade.type === 'LONG';
-      const pnl = isLong 
-        ? ((currentPrice - trade.entry) / trade.entry) * 100 
-        : ((trade.entry - currentPrice) / trade.entry) * 100;
-      const pnlStr = pnl.toFixed(2) + '%';
-
-      // 1. Cek SL
-      const hitSl = isLong ? (currentPrice <= trade.sl) : (currentPrice >= trade.sl);
-      if (hitSl) {
-        await sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
-        delete activeTrades[sym];
-        modified = true;
-        continue;
-      }
-
-      // 2. Cek TP3 (Full Close)
-      const hitTp3 = isLong ? (currentPrice >= trade.tp3) : (currentPrice <= trade.tp3);
-      if (hitTp3) {
-        await sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}\n\n🎉 Selamat, Trade Selesai! 💰`);
-        delete activeTrades[sym];
-        modified = true;
-        continue;
-      }
-
-      // 3. Cek TP2
-      if (!trade.hitTp2) {
-        const hitTp2 = isLong ? (currentPrice >= trade.tp2) : (currentPrice <= trade.tp2);
-        if (hitTp2) {
-          trade.hitTp2 = true;
-          trade.hitTp1 = true;
-          modified = true;
-          await sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nPnL Saat Ini: ${pnlStr}\nSisa Target: TP3 (${trade.tp3})`);
-        }
-      }
-
-      // 4. Cek TP1 (Memicu SL Plus / Break-Even)
-      if (!trade.hitTp1) {
-        const hitTp1 = isLong ? (currentPrice >= trade.tp1) : (currentPrice <= trade.tp1);
-        if (hitTp1) {
-          trade.hitTp1 = true;
-          modified = true;
-          
-          await sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nHarga Saat Ini: ${currentPrice}\nPnL Saat Ini: ${pnlStr}\nSisa Target: TP2 (${trade.tp2}), TP3 (${trade.tp3})`);
-          
-          // GESER STOP LOSS KE HARGA ENTRY (SL PLUS)
-          if (!trade.slMoved && process.env.TRADING_ENABLED === 'true') {
-            const success = await moveStopLossToBreakEven(sym, trade.entry, trade.type);
-            if (success) {
-              trade.slMoved = true;
-              trade.sl = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
-            }
-          }
-        }
-      }
-    }
-
-    if (modified) {
-      saveActiveTrades(activeTrades);
-    }
-  } catch (error) {
-    console.error('[tracker] Error saat memonitor harga Binance:', error.message);
   }
 }
 
@@ -1158,6 +1235,7 @@ app.get('/api/test-api', async (req, res) => {
     res.json({
       status: 'connected',
       environment: USE_TESTNET ? 'Testnet' : 'Live',
+      wsStatus,
       balance: balance ? parseFloat(balance.walletBalance).toFixed(2) : '0',
       positionsCount: account.positions.filter(p => parseFloat(p.positionAmt) !== 0).length
     });
@@ -1296,15 +1374,16 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, HOST, async () => {
-  console.log('\n==========================================');
-  console.log('  Futures Signal Scanner');
-  console.log(`  http://${HOST}:${PORT}`);
-  console.log(`  Binance base URL: ${getActiveBaseUrl()}`);
-  if (BINANCE_BASE_URLS.length > 1) {
-    console.log(`  Failover endpoints: ${BINANCE_BASE_URLS.join(', ')}`);
-  }
-  console.log('==========================================\n');
-  
-  await updateWatchlist();
-  setInterval(updateWatchlist, 3600 * 1000); // 1 hour
+    console.log('\n==========================================');
+    console.log('  Futures Signal Scanner (GO LIVE MODE)');
+    console.log(`  http://${HOST}:${PORT}`);
+    console.log(`  Binance base URL: ${getActiveBaseUrl()}`);
+    console.log('==========================================\n');
+    
+    await updateWatchlist();
+    if (process.env.USE_WEBSOCKET !== 'false') {
+      initBinanceWebSocket();
+    }
+
+    setInterval(updateWatchlist, 3600 * 1000); // 1 hour
 });

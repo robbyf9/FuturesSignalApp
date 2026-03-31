@@ -188,6 +188,7 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
     <div style="display:flex;align-items:center;gap:12px">
       <span style="font-size:11px;color:var(--tx3);border-left:1px solid var(--br);padding-left:12px;margin-left:4px;display:flex;align-items:center;gap:6px">
         <span id="scalper-tag" style="display:none;background:var(--rd);color:var(--r);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid var(--rb)">SCALPER MODE</span>
+        <span id="live-tag" style="display:none;background:var(--gb);color:var(--g);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;border:1px solid var(--g);animation:pulse 2s infinite">📡 LIVE</span>
         <span id="api-status-dot" class="sdot"></span>
         <span id="api-status-text" onclick="checkApiStatus()" style="cursor:pointer">Cek API...</span>
       </span>
@@ -709,6 +710,13 @@ async function checkApiStatus() {
       dot.className = 'sdot live';
       txt.textContent = `${data.environment}: $${data.balance}`;
       txt.style.color = 'var(--g)';
+      
+      const liveTag = document.getElementById('live-tag');
+      if (data.wsStatus === 'CONNECTED') {
+        liveTag.style.display = 'inline-block';
+      } else {
+        liveTag.style.display = 'none';
+      }
       
       const atEnv = document.getElementById('at-env');
       if (atEnv) atEnv.textContent = `(${data.environment} CONNECTED)`;
