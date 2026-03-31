@@ -368,6 +368,18 @@ async function executeBinanceTrade(signalData) {
   }
 
   const { symbol, signal, price } = signalData;
+
+  // Simbol TradFi-Perps (Commodity / Logam) memerlukan persetujuan khusus di Binance.
+  // Scanner boleh tampilkan sinyalnya, tapi auto-trade di-skip dengan notif yang jelas.
+  const TRADFI_SYMBOLS = new Set([
+    'XAUUSDT', 'XAGUSDT', 'XPTUSDТ', 'WBETHUSDT',
+    // Tambahkan simbol lain jika perlu
+  ]);
+  if (TRADFI_SYMBOLS.has(symbol)) {
+    console.log(`[trade] Skip auto-trade ${symbol}: Simbol TradFi-Perps, perlu sign agreement di Binance terlebih dahulu.`);
+    return;
+  }
+
   const side = signal.signal.includes('LONG') ? 'BUY' : 'SELL';
   const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
   
@@ -435,6 +447,15 @@ async function executeBinanceTrade(signalData) {
 
   } catch (err) {
     const msg = err.response?.data?.msg || err.message;
+    const errCode = err.response?.data?.code;
+
+    // Deteksi error Agreement TradFi-Perps dari Binance
+    if (msg && msg.toLowerCase().includes('tradfi') || msg.toLowerCase().includes('agreement') || errCode === -4185) {
+      console.warn(`[trade] Skip ${symbol}: Perlu sign TradFi-Perps Agreement di Binance.com terlebih dahulu.`);
+      await sendTelegramMessage(`ℹ️ *INFO AUTO-TRADE: ${symbol}*\n\nSimbol ini adalah produk TradFi-Perps (Commodity/Logam).\n\nUntuk mengaktifkan auto-trade, silakan sign agreement di:\nBinance Futures → ${symbol} → Accept Agreement\n\nScanner tetap aktif, sinyal tetap dikirim.`);
+      return;
+    }
+
     console.error(`[trade] Gagal mengeksekusi order ${symbol}:`, msg);
     await sendTelegramMessage(`⚠️ *AUTO-TRADE FAILED* ⚠️\n\nKoin: ${symbol}\nError: ${msg}`);
   }
