@@ -1433,7 +1433,7 @@ app.get('/api/test-api', async (req, res) => {
 
 app.get('/api/scanner', async (req, res) => {
   const interval = req.query.interval || '1h';
-  const minScore = parseInt(req.query.minScore, 10) || 5; // Default ubah dari 0 ke 5, agar yg tampil berpotensi saja
+  const minScore = parseInt(req.query.minScore, 10) || 0; 
   const batchSize = 5;
   const startedAt = Date.now();
   const results = [];
