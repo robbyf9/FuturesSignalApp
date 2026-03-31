@@ -45,10 +45,12 @@ function getActiveBaseUrl() {
   return BINANCE_BASE_URLS[activeBaseIndex] || DEFAULT_BINANCE_BASE_URL;
 }
 
-// Global Live State
+// Global Live State (Memory Cache)
 let livePrices = {};
 let wsConnection = null;
 let wsStatus = 'DISCONNECTED';
+let cachedActiveTrades = null; // Cache untuk cegah I/O berlebih
+let lastNotified = {}; // Tracker anti-spam notifikasi (symbol_type -> timestamp)
 
 function rotateBaseUrl() {
   if (BINANCE_BASE_URLS.length <= 1) return false;
@@ -818,17 +820,23 @@ async function ensureExchangeAvailable() {
 const ACTIVE_TRADES_FILE = path.join(__dirname, 'active_trades.json');
 
 function loadActiveTrades() {
+  // Gunakan cache jika sudah tersedia
+  if (cachedActiveTrades) return cachedActiveTrades;
+
   if (fs.existsSync(ACTIVE_TRADES_FILE)) {
     try {
-      return JSON.parse(fs.readFileSync(ACTIVE_TRADES_FILE, 'utf8'));
+      cachedActiveTrades = JSON.parse(fs.readFileSync(ACTIVE_TRADES_FILE, 'utf8'));
+      return cachedActiveTrades;
     } catch (e) {
       console.error('[tracker] Gagal membaca active_trades.json:', e.message);
     }
   }
-  return {};
+  cachedActiveTrades = {};
+  return cachedActiveTrades;
 }
 
 function saveActiveTrades(trades) {
+  cachedActiveTrades = trades; // Update cache
   try {
     fs.writeFileSync(ACTIVE_TRADES_FILE, JSON.stringify(trades, null, 2), 'utf8');
   } catch (e) {
@@ -989,7 +997,6 @@ function initBinanceWebSocket() {
       if (!Array.isArray(tickers)) return;
 
       const activeTrades = loadActiveTrades();
-      const activeSymbols = Object.keys(activeTrades);
       let modified = false;
 
       tickers.forEach(t => {
@@ -997,8 +1004,8 @@ function initBinanceWebSocket() {
         const currentPrice = parseFloat(t.c);
         livePrices[symbol] = currentPrice;
 
-        // Jika koin ini ada dalam trade aktif, cek TP/SL seketika (INSTANT)
-        if (activeSymbols.includes(symbol)) {
+        // Cek trade yang sedang berjalan (menggunakan cache memori agar instan/irit)
+        if (activeTrades[symbol]) {
           const trade = activeTrades[symbol];
           const result = checkTradeLevels(trade, currentPrice);
           if (result.modified) {
@@ -1035,6 +1042,15 @@ function checkTradeLevels(trade, currentPrice) {
   const isLong = trade.type === 'LONG';
   const sym = trade.symbol;
   
+  // Anti-Spam: Pastikan notifikasi yang sama tidak dikirim berulang kali (Cooldown 30 detik)
+  function shouldNotify(type) {
+    const key = `${sym}_${type}`;
+    const now = Date.now();
+    if (lastNotified[key] && now - lastNotified[key] < 30000) return false;
+    lastNotified[key] = now;
+    return true;
+  }
+
   const pnl = isLong 
     ? ((currentPrice - trade.entry) / trade.entry) * 100 
     : ((trade.entry - currentPrice) / trade.entry) * 100;
@@ -1043,31 +1059,40 @@ function checkTradeLevels(trade, currentPrice) {
   // 1. Cek SL
   const hitSl = isLong ? (currentPrice <= trade.sl) : (currentPrice >= trade.sl);
   if (hitSl) {
-    sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
-    const activeTrades = loadActiveTrades();
-    delete activeTrades[sym];
-    saveActiveTrades(activeTrades);
-    return { modified: true };
+    if (shouldNotify('SL')) {
+      sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
+      const activeTrades = loadActiveTrades();
+      delete activeTrades[sym];
+      // Hapus cache notif juga agar koin ini bisa di-trade lagi nanti
+      delete lastNotified[`${sym}_SL`];
+      delete lastNotified[`${sym}_TP1`];
+      delete lastNotified[`${sym}_TP2`];
+      delete lastNotified[`${sym}_TP3`];
+      return { modified: true };
+    }
   }
 
-  // 2. Cek TP3 (Full Close)
+  // 2. Cek TP3
   const hitTp3 = isLong ? (currentPrice >= trade.tp3) : (currentPrice <= trade.tp3);
   if (hitTp3) {
-    sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
-    const activeTrades = loadActiveTrades();
-    delete activeTrades[sym];
-    saveActiveTrades(activeTrades);
-    return { modified: true };
+    if (shouldNotify('TP3')) {
+      sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
+      const activeTrades = loadActiveTrades();
+      delete activeTrades[sym];
+      return { modified: true };
+    }
   }
 
   // 3. Cek TP2
   if (!trade.hitTp2) {
     const hitTp2 = isLong ? (currentPrice >= trade.tp2) : (currentPrice <= trade.tp2);
     if (hitTp2) {
-      trade.hitTp2 = true;
-      trade.hitTp1 = true;
-      changed = true;
-      sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
+      if (shouldNotify('TP2')) {
+        trade.hitTp2 = true;
+        trade.hitTp1 = true;
+        changed = true;
+        sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
+      }
     }
   }
 
@@ -1075,21 +1100,23 @@ function checkTradeLevels(trade, currentPrice) {
   if (!trade.hitTp1) {
     const hitTp1 = isLong ? (currentPrice >= trade.tp1) : (currentPrice <= trade.tp1);
     if (hitTp1) {
-      trade.hitTp1 = true;
-      changed = true;
-      sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
-      
-      if (!trade.slMoved && process.env.TRADING_ENABLED === 'true') {
-        moveStopLossToBreakEven(sym, trade.entry, trade.type).then(success => {
-          if (success) {
-            const activeTrades = loadActiveTrades();
-            if (activeTrades[sym]) {
-              activeTrades[sym].slMoved = true;
-              activeTrades[sym].sl = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
-              saveActiveTrades(activeTrades);
+      if (shouldNotify('TP1')) {
+        trade.hitTp1 = true;
+        changed = true;
+        sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
+        
+        if (!trade.slMoved && process.env.TRADING_ENABLED === 'true') {
+          moveStopLossToBreakEven(sym, trade.entry, trade.type).then(success => {
+            if (success) {
+              const activeTrades = loadActiveTrades();
+              if (activeTrades[sym]) {
+                activeTrades[sym].slMoved = true;
+                activeTrades[sym].sl = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
+                saveActiveTrades(activeTrades);
+              }
             }
-          }
-        });
+          });
+        }
       }
     }
   }
