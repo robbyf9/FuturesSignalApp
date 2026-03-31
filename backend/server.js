@@ -686,20 +686,20 @@ async function analyzePair(symbol, interval = '1h', full = false) {
   const price = parseFloat(ticker.lastPrice);
   const fundingRate = parseFloat(funding.lastFundingRate) * 100;
 
-    indicators: {
-      rsi: calcRSI(closes),
-      rsi7: calcRSI(closes, 7),
-      macd: calcMACD(closes),
-      ema9: calcEMA(closes, 9),
-      ema21: calcEMA(closes, 21),
-      ema20: calcEMA(closes, 20),
-      ema50: calcEMA(closes, 50),
-      ema200: calcEMA(closes, 200),
-      bb: calcBB(closes),
-      stochRSI: calcStochRSI(closes),
-      atr: calcATR(klines),
-      vwap: calcVWAP(klines.slice(-24)),
-    },
+  const indicators = {
+    rsi: calcRSI(closes),
+    rsi7: calcRSI(closes, 7),
+    macd: calcMACD(closes),
+    ema9: calcEMA(closes, 9),
+    ema21: calcEMA(closes, 21),
+    ema20: calcEMA(closes, 20),
+    ema50: calcEMA(closes, 50),
+    ema200: calcEMA(closes, 200),
+    bb: calcBB(closes),
+    stochRSI: calcStochRSI(closes),
+    atr: calcATR(klines),
+    vwap: calcVWAP(klines.slice(-24)),
+  };
 
   const signal = generateSignal(indicators, price, fundingRate);
   const result = {
