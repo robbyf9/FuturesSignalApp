@@ -654,21 +654,29 @@ async function runBackgroundScanner() {
         const item = result.value;
         if (Math.abs(item.signal.score) >= minScore) {
           const entry = item.market ? item.market.price : item.price;
+          const currentType = item.signal.signal.includes('LONG') ? 'LONG' : 'SHORT';
+          const existing = activeTrades[item.symbol];
           
-          // Overwrite trade jika ada sinyal ekstrim berulang
-          await sendToTelegram(item);
+          // ANTI-SPAM: Hanya kirim ke Telegram jika koin belum ada di active trades dengan tipe yang sama
+          if (!existing || existing.type !== currentType) {
+            await sendToTelegram(item);
+            console.log(`[telegram] Sinyal Baru: ${item.symbol} (${currentType})`);
+          } else {
+            console.log(`[tracker] Update: ${item.symbol} tetap ${currentType}, notif diabaikan (anti-spam).`);
+          }
           
+          // Tetap update data TP/SL terbaru di database lokal agar tracker tetap akurat
           activeTrades[item.symbol] = {
             symbol: item.symbol,
-            type: item.signal.signal.includes('LONG') ? 'LONG' : 'SHORT',
+            type: currentType,
             entry: parseFloat(entry),
             tp1: parseFloat(item.signal.levels.tp1),
             tp2: parseFloat(item.signal.levels.tp2),
             tp3: parseFloat(item.signal.levels.tp3),
             sl: parseFloat(item.signal.levels.sl),
-            hitTp1: false,
-            hitTp2: false,
-            timestamp: Date.now()
+            hitTp1: existing ? existing.hitTp1 : false,
+            hitTp2: existing ? existing.hitTp2 : false,
+            timestamp: existing ? existing.timestamp : Date.now()
           };
         }
       }
