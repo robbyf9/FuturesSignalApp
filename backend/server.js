@@ -47,20 +47,21 @@ const BINANCE_BASE_URLS = [
 ];
 let activeBaseIndex = 0;
 
-function getActiveBaseUrl() {
-  const USE_TESTNET = process.env.USE_BINANCE_TESTNET === 'true';
-  const defaultTestnet = 'https://fapi-testnet.binance.com';
-  const defaultMainnet = 'https://fapi.binance.com';
-
-  // Jika mode TESTNET aktif, jangan gunakan BINANCE_BASE_URLS dari .env (karena biasanya isinya mainnet)
-  // Kecuali user memang menset URL khusus testnet di sana.
-  if (USE_TESTNET) return defaultTestnet;
-
+// URL untuk Market Data (Scanner, Klines, Ticker) — SELALU gunakan mainnet/proxy
+function getMarketBaseUrl() {
   if (BINANCE_BASE_URLS.length > 0) {
     return BINANCE_BASE_URLS[activeBaseIndex];
   }
-  
-  return defaultMainnet;
+  return 'https://fapi.binance.com';
+}
+
+// URL untuk Trading API (Order, Position) — bisa testnet jika diaktifkan
+function getActiveBaseUrl() {
+  const USE_TESTNET = process.env.USE_BINANCE_TESTNET === 'true';
+  const defaultTestnet = 'https://fapi-testnet.binance.com';
+
+  if (USE_TESTNET) return defaultTestnet;
+  return getMarketBaseUrl();
 }
 
 // Global Live State (Memory Cache)
@@ -182,8 +183,9 @@ async function updateWatchlist() {
 }
 
 
+// Axios instance untuk MARKET DATA — selalu pakai mainnet/proxy
 const api = axios.create({
-  baseURL: getActiveBaseUrl(),
+  baseURL: getMarketBaseUrl(),
   timeout: REQUEST_TIMEOUT_MS,
   headers: {
     Accept: 'application/json',
@@ -192,7 +194,8 @@ const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  config.baseURL = getActiveBaseUrl();
+  // Market data selalu pakai mainnet, bukan testnet
+  config.baseURL = getMarketBaseUrl();
   return config;
 });
 
@@ -1285,10 +1288,12 @@ app.get('/api/health', (_, res) => {
     timestamp: Date.now(),
     pairs: WATCHLIST.length,
     version: '2.6-DEBUG',
-    baseURL: getActiveBaseUrl(),
+    marketBaseURL: getMarketBaseUrl(),
+    tradingBaseURL: getActiveBaseUrl(),
     configuredBaseURLs: BINANCE_BASE_URLS,
     tradingTimeframe: process.env.TRADING_TIMEFRAME || '1h',
-    tradingEnabled: process.env.TRADING_ENABLED === 'true'
+    tradingEnabled: process.env.TRADING_ENABLED === 'true',
+    useTestnet: process.env.USE_BINANCE_TESTNET === 'true'
   });
 });
 
