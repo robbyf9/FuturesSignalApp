@@ -610,6 +610,68 @@ function calcATR(klines, period = 14) {
   return trueRanges.slice(-period).reduce((sum, value) => sum + value, 0) / period;
 }
 
+function calcADX(klines, period = 14) {
+  if (klines.length < period * 2) return { adx: 0, plusDI: 0, minusDI: 0 };
+
+  const trs = [];
+  const plusDMs = [];
+  const minusDMs = [];
+
+  for (let i = 1; i < klines.length; i++) {
+    const h = Number(klines[i][2]);
+    const l = Number(klines[i][3]);
+    const ph = Number(klines[i - 1][2]);
+    const pl = Number(klines[i - 1][3]);
+    const pc = Number(klines[i - 1][4]);
+
+    const tr = Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+    trs.push(tr);
+
+    const upMove = h - ph;
+    const downMove = pl - l;
+
+    if (upMove > downMove && upMove > 0) plusDMs.push(upMove);
+    else plusDMs.push(0);
+
+    if (downMove > upMove && downMove > 0) minusDMs.push(downMove);
+    else minusDMs.push(0);
+  }
+
+  const smoothRange = (arr, p) => {
+    let prev = arr.slice(0, p).reduce((a, b) => a + b, 0);
+    const smoothed = [prev];
+    for (let i = p; i < arr.length; i++) {
+      prev = prev - (prev / p) + arr[i];
+      smoothed.push(prev);
+    }
+    return smoothed;
+  };
+
+  const sTR = smoothRange(trs, period);
+  const sPlusDM = smoothRange(plusDMs, period);
+  const sMinusDM = smoothRange(minusDMs, period);
+
+  const dxs = [];
+  for (let i = 0; i < sTR.length; i++) {
+    const plusDI = (sPlusDM[i] / sTR[i]) * 100;
+    const minusDI = (sMinusDM[i] / sTR[i]) * 100;
+    const dx = Math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100;
+    dxs.push({ dx, plusDI, minusDI });
+  }
+
+  let adxValue = dxs.slice(0, period).reduce((s, x) => s + x.dx, 0) / period;
+  for (let i = period; i < dxs.length; i++) {
+    adxValue = (adxValue * (period - 1) + dxs[i].dx) / period;
+  }
+
+  const last = dxs[dxs.length - 1];
+  return {
+    adx: parseFloat(adxValue.toFixed(2)),
+    plusDI: parseFloat(last.plusDI.toFixed(2)),
+    minusDI: parseFloat(last.minusDI.toFixed(2))
+  };
+}
+
 function calcVWAP(klines) {
   let volumePrice = 0;
   let volume = 0;
@@ -649,12 +711,24 @@ function generateSignal(indicators, price, fundingRate, interval = '1h') {
     score += 2;
     if (isScalp && macd.histogram > 0) score += 1;
     reasons.push('MACD bullish crossover');
-  } else {
+  } else if (macd.macd < macd.signal) {
     score -= 2;
+    if (isScalp && macd.histogram < 0) score -= 1;
     reasons.push('MACD bearish crossover');
   }
 
-  // 3. EMA Cross Logic (EMA 9/21 for Scalping, EMA 20/50 for Swing)
+  // 3. TREND FILTER (EMA 200 & EMA 9/21/50)
+  const ema200 = indicators.ema200;
+  if (ema200) {
+    if (price > ema200) {
+      score += 2;
+      reasons.push('Price above EMA 200 (HTF Bullish)');
+    } else {
+      score -= 2;
+      reasons.push('Price below EMA 200 (HTF Bearish)');
+    }
+  }
+
   if (isScalp && ema9 && ema21) {
     if (ema9 > ema21) {
       score += 3;
@@ -665,12 +739,25 @@ function generateSignal(indicators, price, fundingRate, interval = '1h') {
     }
   } else {
     if (ema20 > ema50) {
-      score += 2;
-      reasons.push('EMA20 above EMA50');
+      score += 3;
+      reasons.push('EMA20 above EMA50 (Trend Bullish)');
     } else {
-      score -= 2;
-      reasons.push('EMA20 below EMA50');
+      score -= 3;
+      reasons.push('EMA20 below EMA50 (Trend Bearish)');
     }
+  }
+
+  // 3a. ADX TREND STRENGTH
+  const { adx, plusDI, minusDI } = indicators.adxInfo || { adx: 0 };
+  if (adx > 25) {
+    score += 1;
+    reasons.push(`Strong trend (ADX: ${adx})`);
+    if (plusDI > minusDI) score += 1;
+    else score -= 1;
+  } else if (adx < 20) {
+    // Sideways market - avoid trend followers, reduce scores
+    score = score * 0.7; 
+    reasons.push(`Weak trend (ADX: ${adx}), being cautious`);
   }
 
   // 4. Bollinger Bands
@@ -758,24 +845,26 @@ function generateSignal(indicators, price, fundingRate, interval = '1h') {
   const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
   const posValue = margin * leverage;
 
-  let tp1;
+  let tp1, tp2, tp3, sl;
+  
+  // TP Ratio Optimization
+  // Scalping: TP1 (ATR 1.0), TP2 (ATR 2.0), TP3 (ATR 3.5), SL (ATR 1.5)
+  // Swing: TP1 (ATR 1.5), TP2 (ATR 3.0), TP3 (ATR 5.0), SL (ATR 2.0)
+  const factor1 = isScalp ? 1.0 : 1.5;
+  const factor2 = isScalp ? 2.0 : 3.0;
+  const factor3 = isScalp ? 3.5 : 5.0;
+  const slFactor = isScalp ? 1.5 : 2.0;
+
   if (fixedProfit > 0 && posValue > 0) {
-    // tp1 = entry ± (profit / total_position_value) * entry
     const priceDiff = (fixedProfit / posValue) * entry;
     tp1 = isLong ? entry + priceDiff : entry - priceDiff;
   } else {
-    const factor1 = isScalp ? 0.8 : 1.5;
     tp1 = isLong ? entry + atr * factor1 : entry - atr * factor1;
   }
 
-  // ATR Multipliers for further targets
-  const factor2 = isScalp ? 1.5 : 3.0;
-  const factor3 = isScalp ? 2.5 : 5.0;
-  const slFactor = isScalp ? 1.0 : 1.2; // Sedikit dilonggarkan untuk scalp agar tidak gampang kena noise di awal
-
-  const tp2 = isLong ? entry + atr * factor2 : entry - atr * factor2;
-  const tp3 = isLong ? entry + atr * factor3 : entry - atr * factor3;
-  const sl = isLong ? entry - atr * slFactor : entry + atr * slFactor;
+  tp2 = isLong ? entry + atr * factor2 : entry - atr * factor2;
+  tp3 = isLong ? entry + atr * factor3 : entry - atr * factor3;
+  sl = isLong ? entry - atr * slFactor : entry + atr * slFactor;
   
   const rr = Math.abs(sl - entry) > 0
     ? parseFloat((Math.abs(tp2 - entry) / Math.abs(sl - entry)).toFixed(2))
@@ -832,6 +921,7 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       bb: calcBB(closes),
       stochRSI: calcStochRSI(closes),
       atr: calcATR(klines),
+      adxInfo: calcADX(klines),
       vwap: calcVWAP(klines.slice(-24)),
     };
 
