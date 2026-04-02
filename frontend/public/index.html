@@ -432,6 +432,20 @@ async function syncLivePrices() {
           pnlPctEl.textContent = (pnlPct > 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
           pnlPctEl.className = 'at-pnl-pct ' + (pnlPct >= 0 ? 'up' : 'dn');
         }
+
+        // --- Visualisasi Trailing SL ---
+        const lastStep = parseInt(row.getAttribute('data-step') || 0);
+        // data-step disimpan saat loadActiveTrades
+        const fixedTp = parseFloat(document.getElementById('fixed-tp-input').value || 0);
+        
+        if (fixedTp > 0) {
+           const targetSpan = row.querySelector('.at-trailing-info');
+           if (targetSpan) {
+              const nextStep = (lastStep + 1) * fixedTp;
+              targetSpan.textContent = `Next SL Move: $${nextStep.toFixed(1)}`;
+              targetSpan.style.color = pnlUsdt >= nextStep ? 'var(--g)' : 'var(--tx3)';
+           }
+        }
       }
     });
 
@@ -834,7 +848,7 @@ async function loadActiveTrades() {
       if (t.tp) targets.push({l:'TP', v:t.tp, c:'var(--g)'});
       if (t.sl) targets.push({l:'SL', v:t.sl, c:'var(--r)'});
 
-      return `<div class="tr at-row" data-symbol="${t.symbol}" data-entry="${t.entry}" data-side="${t.type}" data-lev="${t.leverage}" style="grid-template-columns:110px 80px 100px 100px 70px 130px 140px 100px" onclick="loadDetail('${t.symbol}');showView('scanner')">
+      return `<div class="tr at-row" data-symbol="${t.symbol}" data-entry="${t.entry}" data-side="${t.type}" data-lev="${t.leverage}" data-step="${t.last_pnl_step || 0}" style="grid-template-columns:110px 80px 100px 100px 70px 130px 140px 100px" onclick="loadDetail('${t.symbol}');showView('scanner')">
         <span style="font-weight:600">${t.symbol.replace('USDT','')}</span>
         <span><span class="pill ${t.type.toLowerCase()}">${t.type}</span></span>
         <span>$${fmtP(t.entry)}</span>
@@ -843,6 +857,7 @@ async function loadActiveTrades() {
         <div style="display:flex;flex-direction:column">
           <span class="at-pnl-usdt ${pnlCls}" style="font-weight:600;font-size:12px">${t.pnl > 0 ? '+' : ''}${t.pnl} USDT</span>
           <span class="at-pnl-pct ${pnlCls}" style="font-size:10px">${t.pnlPercent > 0 ? '+' : ''}${t.pnlPercent}%</span>
+          <span class="at-trailing-info" style="font-size:8px; margin-top:2px; color:var(--tx3)"></span>
         </div>
         <div style="display:flex; gap:4px; flex-wrap:wrap">
           ${targets.length > 0 ? targets.map(tg => `
@@ -1027,8 +1042,12 @@ async function loadDailySettings() {
 }
 
 async function saveAllSettings() {
-    const target = document.getElementById('target-input').value;
-    const fixedTp = document.getElementById('fixed-tp-input').value;
+    let target = document.getElementById('target-input').value;
+    let fixedTp = document.getElementById('fixed-tp-input').value;
+    
+    // Auto-fix comma to dot
+    target = String(target).replace(',', '.');
+    fixedTp = String(fixedTp).replace(',', '.');
     
     try {
         const res = await fetch(`${API}/settings`, {

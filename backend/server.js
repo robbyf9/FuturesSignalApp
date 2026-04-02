@@ -1377,23 +1377,123 @@ function checkTradeLevels(trade, currentPrice) {
     }
   }
 
+  // --- 🔥 DYNAMIC TRAILING SL ($ STEP) Logic ---
+  const settings = loadSettings();
+  const step = settings.fixed_tp_usdt;
+  
+  if (step > 0 && process.env.TRADING_ENABLED === 'true') {
+      const margin = trade.margin || 20;
+      const leverage = trade.leverage || 10;
+      const posValue = margin * leverage;
+      
+      // Hitung PnL dalam USDT (Real-time di memori)
+      const pnlUsdt = isLong 
+        ? ((currentPrice - trade.entry) / trade.entry) * posValue 
+        : ((trade.entry - currentPrice) / trade.entry) * posValue;
+      
+      // Ambil kelipatan step yang sudah tercapai
+      const currentStep = Math.floor(pnlUsdt / step);
+      
+      if (currentStep > (trade.last_pnl_step || 0)) {
+          // Level Baru Terdeteksi (Misal: Profit naik dari $0.4 ke $0.6, step=$0.5)
+          // SL Baru = (Step sebelumnya) -> Profit Aman $0.5
+          const targetProfitUsdt = (currentStep - 1) * step;
+          const priceDiff = (targetProfitUsdt / posValue) * trade.entry;
+          const newSlPrice = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
+          
+          // Ganti SL di Binance
+          moveStopLossToBreakEven(sym, newSlPrice / (isLong ? 1.001 : 0.999), trade.type).then(success => {
+             if (success) {
+                 const activeTrades = loadActiveTrades();
+                 if (activeTrades[sym]) {
+                     activeTrades[sym].last_pnl_step = currentStep;
+                     activeTrades[sym].sl = newSlPrice;
+                     saveActiveTrades(activeTrades);
+                     sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit mencapai $${pnlUsdt.toFixed(2)}. Stop Loss digeser ke level profit $${targetProfitUsdt.toFixed(2)} ($${fmtP(newSlPrice)})`);
+                 }
+             }
+          });
+          
+          trade.last_pnl_step = currentStep;
+          trade.sl = newSlPrice;
+          changed = true;
+      }
+  }
+  // ------------------------------------------------
+
   // 5. Cek TP2 (Memicu SL+ Level 2: Geser ke TP1)
-  if (trade.hitTp2 && !trade.slMovedToTp1 && process.env.TRADING_ENABLED === 'true') {
-      const tp1Price = trade.tp1;
-      moveStopLossToBreakEven(sym, tp1Price / (isLong ? 1.001 : 0.999), trade.type).then(success => {
-          if (success) {
-              const activeTrades = loadActiveTrades();
-              if (activeTrades[sym]) {
-                  activeTrades[sym].slMovedToTp1 = true;
-                  activeTrades[sym].sl = tp1Price;
-                  saveActiveTrades(activeTrades);
-                  sendTelegramMessage(`🛡️ *SL+ UPGRADE: ${sym}* 🛡️\n\nTarget TP2 tercapai, Stop Loss digeser ke level TP1 (${tp1Price}) untuk mengamankan profit lebih besar!`);
-              }
-          }
-      });
+  if (!trade.hitTp2) {
+      const hitTp2 = isLong ? (currentPrice >= trade.tp2) : (currentPrice <= trade.tp2);
+      if (hitTp2) {
+         trade.hitTp2 = true;
+         changed = true;
+         // Upgrade SL manual jika tidak menggunakan Dynamic Trailing
+         if (step <= 0 && process.env.TRADING_ENABLED === 'true') {
+            const tp1Price = trade.tp1;
+            moveStopLossToBreakEven(sym, tp1Price / (isLong ? 1.001 : 0.999), trade.type).then(success => {
+                if (success) {
+                    const activeTrades = loadActiveTrades();
+                    if (activeTrades[sym]) {
+                        activeTrades[sym].slMovedToTp1 = true;
+                        activeTrades[sym].sl = tp1Price;
+                        saveActiveTrades(activeTrades);
+                        sendTelegramMessage(`🛡️ *SL+ UPGRADE: ${sym}* 🛡️\n\nTarget TP2 tercapai, Stop Loss digeser ke level TP1!`);
+                    }
+                }
+            });
+         }
+      }
   }
 
   return { modified: changed };
+}
+
+/**
+ * Adopsi posisi yang tidak dikenal (dibuka manual) agar bisa diawasi bot
+ */
+async function adoptOrphanPositions() {
+  if (process.env.TRADING_ENABLED !== 'true') return;
+  
+  try {
+    const positions = await getBinancePositions();
+    if (positions.length === 0) return;
+    
+    const activeTrades = loadActiveTrades();
+    let changed = false;
+    
+    for (const pos of positions) {
+      const sym = pos.symbol;
+      if (!activeTrades[sym] && WATCHLIST.includes(sym)) {
+        // Ditemukan posisi manual yang koinnya ada di watchlist
+        const side = parseFloat(pos.positionAmt) > 0 ? 'LONG' : 'SHORT';
+        const entryPrice = parseFloat(pos.entryPrice);
+        const leverage = parseInt(pos.leverage);
+        const margin = parseFloat(pos.isolatedWallet || 0);
+
+        // Buat dummy TP/SL (akan segera dioverwrite oleh Trailing SL jika profit)
+        activeTrades[sym] = {
+           symbol: sym,
+           type: side,
+           entry: entryPrice,
+           leverage: leverage,
+           margin: margin,
+           tp1: side === 'LONG' ? entryPrice * 1.01 : entryPrice * 0.99,
+           tp2: side === 'LONG' ? entryPrice * 1.02 : entryPrice * 0.98,
+           tp3: side === 'LONG' ? entryPrice * 1.03 : entryPrice * 0.97,
+           sl: side === 'LONG' ? entryPrice * 0.98 : entryPrice * 1.02,
+           timestamp: Date.now(),
+           adopted: true
+        };
+        changed = true;
+        console.log(`[adoption] Mengadopsi posisi manual: ${sym} (${side})`);
+        sendTelegramMessage(`🤝 *POSISI DIADOPSI: ${sym}* 🤝\n\nPosisi manual Anda dideteksi dan sekarang mulai diawasi oleh bot dengan aturan Trailing SL terbaru.`);
+      }
+    }
+    
+    if (changed) saveActiveTrades(activeTrades);
+  } catch (e) {
+    console.error('[adoption] Gagal mengadopsi posisi:', e.message);
+  }
 }
 
 async function monitorActiveTrades() {
@@ -1403,7 +1503,43 @@ async function monitorActiveTrades() {
 
   const activeTrades = loadActiveTrades();
   const symbols = Object.keys(activeTrades);
+  
+  // Cek posisi baru di bursa setiap menit
+  adoptOrphanPositions();
+
   if (symbols.length === 0) return;
+
+  // Sync dengan posisi riel di Binance untuk mendeteksi penutupan manual
+  try {
+    const rawPositions = await getBinancePositions();
+    const liveSymbols = rawPositions.map(p => p.symbol);
+    let historyChanged = false;
+
+    for (const sym of symbols) {
+      if (!liveSymbols.includes(sym)) {
+        // Koin ini ada di catatan bot, tapi sudah tidak ada di bursa (Berarti sudah ditutup manual)
+        const trade = activeTrades[sym];
+        const exitPrice = livePrices[sym] || trade.entry; // Pakai harga live terakhir
+        
+        console.log(`[history] Mandeteksi penutupan manual: ${sym}`);
+        saveToHistory({
+          symbol: sym,
+          type: trade.type,
+          entry: trade.entry,
+          exit: exitPrice,
+          reason: 'Manual/External Close'
+        });
+        
+        delete activeTrades[sym];
+        historyChanged = true;
+        sendTelegramMessage(`ℹ️ *TRADE CLOSED (EXTERNAL): ${sym}* ℹ️\n\nPosisi dideteksi telah ditutup secara manual atau oleh sistem bursa eksternal. Data telah dipindahkan ke History.`);
+      }
+    }
+    
+    if (historyChanged) saveActiveTrades(activeTrades);
+  } catch (e) {
+    console.error('[history-sync] Gagal sinkronisasi histori penutupan:', e.message);
+  }
 
   // Jika WebSocket Down, gunakan polling sebagai fallback
   if (wsStatus !== 'CONNECTED') {
@@ -1479,8 +1615,16 @@ app.post('/api/settings', (req, res) => {
     const { daily_pnl_target, fixed_tp_usdt } = req.body;
     
     const settings = loadSettings();
-    if (daily_pnl_target !== undefined) settings.daily_pnl_target = parseFloat(daily_pnl_target);
-    if (fixed_tp_usdt !== undefined) settings.fixed_tp_usdt = parseFloat(fixed_tp_usdt);
+    if (daily_pnl_target !== undefined) {
+        // Handle comma input
+        const val = String(daily_pnl_target).replace(',', '.');
+        settings.daily_pnl_target = parseFloat(val);
+    }
+    if (fixed_tp_usdt !== undefined) {
+        // Handle comma input
+        const val = String(fixed_tp_usdt).replace(',', '.');
+        settings.fixed_tp_usdt = parseFloat(val);
+    }
     
     saveSettings(settings);
     res.json({ success: true, settings });
