@@ -370,6 +370,43 @@ async function syncLivePrices() {
       const mvEl = document.querySelector('#det-metrics .mc:first-child .mv');
       if (mvEl) mvEl.textContent = '$' + fmtP(livePrice);
     }
+
+    // 🔥 Update PnL Real-Time di Tab Active Trades
+    const atRows = document.querySelectorAll('.at-row');
+    atRows.forEach(row => {
+      const symbol = row.getAttribute('data-symbol');
+      const entry = parseFloat(row.getAttribute('data-entry'));
+      const side = row.getAttribute('data-side'); 
+      const leverage = parseFloat(row.getAttribute('data-lev'));
+      const curPrice = prices[symbol];
+
+      if (curPrice && entry) {
+        const isLong = side === 'LONG';
+        const pnlPct = isLong 
+          ? ((curPrice - entry) / entry) * 100 
+          : ((entry - curPrice) / entry) * 100;
+        
+        // Estimasi PnL USDT (PnL % * Margin)
+        // Catatan: Ini estimasi kasar karena margin riel dihitung bursa
+        // Tapi cukup untuk visualisasi live
+        const pnlUsdt = (pnlPct / 100) * (20 * leverage); 
+
+        const priceEl = row.querySelector('.at-price');
+        const pnlUsdtEl = row.querySelector('.at-pnl-usdt');
+        const pnlPctEl = row.querySelector('.at-pnl-pct');
+
+        if (priceEl) priceEl.textContent = '$' + fmtP(curPrice);
+        if (pnlUsdtEl) {
+          pnlUsdtEl.textContent = (pnlUsdt > 0 ? '+' : '') + pnlUsdt.toFixed(2) + ' USDT';
+          pnlUsdtEl.className = 'at-pnl-usdt ' + (pnlUsdt >= 0 ? 'up' : 'dn');
+        }
+        if (pnlPctEl) {
+          pnlPctEl.textContent = (pnlPct > 0 ? '+' : '') + pnlPct.toFixed(2) + '%';
+          pnlPctEl.className = 'at-pnl-pct ' + (pnlPct >= 0 ? 'up' : 'dn');
+        }
+      }
+    });
+
   } catch (e) {
     console.warn('Live sync failed:', e.message);
   }
@@ -769,15 +806,15 @@ async function loadActiveTrades() {
       if (t.tp) targets.push({l:'TP', v:t.tp, c:'var(--g)'});
       if (t.sl) targets.push({l:'SL', v:t.sl, c:'var(--r)'});
 
-      return `<div class="tr" style="grid-template-columns:110px 80px 100px 100px 70px 130px 140px 100px" onclick="loadDetail('${t.symbol}');showView('scanner')">
+      return `<div class="tr at-row" data-symbol="${t.symbol}" data-entry="${t.entry}" data-side="${t.type}" data-lev="${t.leverage}" style="grid-template-columns:110px 80px 100px 100px 70px 130px 140px 100px" onclick="loadDetail('${t.symbol}');showView('scanner')">
         <span style="font-weight:600">${t.symbol.replace('USDT','')}</span>
         <span><span class="pill ${t.type.toLowerCase()}">${t.type}</span></span>
         <span>$${fmtP(t.entry)}</span>
-        <span>$${fmtP(t.currentPrice)}</span>
+        <span class="at-price">$${fmtP(t.currentPrice)}</span>
         <span style="color:var(--tx3)">${t.leverage}x</span>
         <div style="display:flex;flex-direction:column">
-          <span class="${pnlCls}" style="font-weight:600;font-size:12px">${t.pnl > 0 ? '+' : ''}${t.pnl} USDT</span>
-          <span class="${pnlCls}" style="font-size:10px">${t.pnlPercent > 0 ? '+' : ''}${t.pnlPercent}%</span>
+          <span class="at-pnl-usdt ${pnlCls}" style="font-weight:600;font-size:12px">${t.pnl > 0 ? '+' : ''}${t.pnl} USDT</span>
+          <span class="at-pnl-pct ${pnlCls}" style="font-size:10px">${t.pnlPercent > 0 ? '+' : ''}${t.pnlPercent}%</span>
         </div>
         <div style="display:flex; gap:4px; flex-wrap:wrap">
           ${targets.length > 0 ? targets.map(tg => `

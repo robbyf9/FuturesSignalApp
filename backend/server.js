@@ -1567,30 +1567,34 @@ app.get('/api/scanner', async (req, res) => {
   const failures = [];
   const failureDetails = [];
 
-  console.log(`\n[scan] STEALTH MODE (${WATCHLIST.length} pairs) | interval=${interval}`);
+  console.log(`\n[scan] BATCH MODE (${WATCHLIST.length} pairs) | interval=${interval}`);
+  const batchSize = 10; // Meningkatkan kecepatan dengan memproses 10 koin sekaligus
 
-  for (const symbol of WATCHLIST) {
-    try {
-      const item = await analyzePair(symbol, interval, false);
-      
-      if (Math.abs(item.signal.score) >= minScore) {
-        results.push(item);
-      }
-      
-      console.log(`  ok ${symbol} -> ${item.signal.signal} (${item.signal.score})`);
-    } catch (error) {
-      const normalized = normalizeAxiosError(error);
-      failures.push(symbol);
-      failureDetails.push({ symbol, error: normalized?.message || 'Unknown error' });
-      
-      if (normalized.status === 429) {
-        console.warn(`[scan] Stealth Speed Limit! Menambah jeda cooldown...`);
-        await sleep(3000); // Tunggu lebih lama jika terdeteksi 429
+  for (let i = 0; i < WATCHLIST.length; i += batchSize) {
+    const batch = WATCHLIST.slice(i, i + batchSize);
+    const settled = await Promise.allSettled(
+      batch.map((symbol) => analyzePair(symbol, interval, false))
+    );
+
+    for (const res of settled) {
+      if (res.status === 'fulfilled') {
+        const item = res.value;
+        if (Math.abs(item.signal.score) >= minScore) {
+          results.push(item);
+        }
+        console.log(`  ok ${item.symbol} -> ${item.signal.signal} (${item.signal.score})`);
+      } else {
+        const err = res.reason;
+        const normalized = normalizeAxiosError(err);
+        failures.push('Unknown');
+        failureDetails.push({ error: normalized?.message || 'Unknown batch error' });
       }
     }
     
-    // Jeda antar koin 1 detik (Mode Lambat tapi Selamat)
-    await sleep(1000);
+    // Jeda antar batch diperkecil menjadi 500ms (Sangat Cepat tapi Tetap Aman)
+    if (i + batchSize < WATCHLIST.length) {
+      await sleep(500);
+    }
   }
 
   const filtered = results
