@@ -398,11 +398,30 @@ async function executeBinanceTrade(signalData) {
     const levParams = signRequest({ symbol, leverage });
     await tradingApi.post('/fapi/v1/leverage', levParams);
 
-    // 2. Hitung Quantity
-    const quantity = (usdtAmount * leverage) / price;
-    const formattedQty = quantity.toFixed(precision.quantity);
+    // 2. ENTRY GUARD: ANTI-CHASE (0.3%)
+    try {
+      const ticker = await api.get('/fapi/v1/ticker/price', { params: { symbol } });
+      const livePrice = parseFloat(ticker.data.price);
+      const signalEntry = parseFloat(signal.levels.entry);
+      
+      const diff = Math.abs((livePrice - signalEntry) / signalEntry) * 100;
+      
+      if (diff > 0.3) {
+        console.log(`[entry-guard] SKIP ${symbol}: Harga sudah lari ${diff.toFixed(2)}% (Limit 0.3%)`);
+        sendTelegramMessage(`⚠️ *TRADE SKIPPED: ${symbol}* ⚠️\n\nHarga bursa ($${fmtP(livePrice)}) sudah terlalu jauh dari sinyal ($${fmtP(signalEntry)}). Selisih: ${diff.toFixed(2)}%.\nBot membatalkan entry demi keamanan.`);
+        return;
+      }
+      // Gunakan harga live untuk perhitungan qty
+      signal.levels.entry = livePrice;
+    } catch (e) {
+      console.error(`[entry-guard] Skip check due to error:`, e.message);
+    }
+
+    // 3. Hitung Quantity
+    const qty = (usdtAmount * leverage) / signal.levels.entry;
+    const formattedQty = qty.toFixed(precision.quantity);
     
-    // 3. Main Order (Market)
+    // 4. Main Order (Market)
     const orderParams = signRequest({
       symbol,
       side,
