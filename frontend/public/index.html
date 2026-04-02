@@ -468,7 +468,7 @@ setInterval(() => {
 
 // ─── View ─────────────────────────────────────────────────────────────────────
 function showView(v) {
-  ['scanner','opportunities','funding','active-trades'].forEach(x => {
+  ['scanner','opportunities','funding','active-trades','trade-history'].forEach(x => {
     const el = document.getElementById('view-'+x);
     if(el) el.style.display = x===v?'block':'none';
     const nav = document.getElementById('nav-'+x);
@@ -879,22 +879,26 @@ async function loadActiveTrades() {
 
 async function loadTradeHistory() {
   const body = document.getElementById('hist-body');
+  if (!body) return; // Mencegah crash jika elemen belum ada
   body.innerHTML = `<div class="ld"><div class="sp"></div><span>Memuat riwayat trading...</span></div>`;
   
   try {
     const res = await fetch(`${API}/trade-history`);
+    if (!res.ok) throw new Error(`Server Error: ${res.status}`);
     const data = await res.json();
     
-    // Update Stats
-    document.getElementById('hist-total-trades').textContent = data.stats.totalTrades;
+    // Safety check data.stats
+    if (!data.stats) data.stats = { totalTrades: 0, winRate: 0, totalPnL: 0 };
+
+    document.getElementById('hist-total-trades').textContent = data.stats.totalTrades || 0;
     document.getElementById('hist-win-rate').textContent = (data.stats.winRate || 0) + '%';
     
     const pnlEl = document.getElementById('hist-total-pnl');
-    const pnlVal = parseFloat(data.stats.totalPnL);
+    const pnlVal = parseFloat(data.stats.totalPnL || 0);
     pnlEl.textContent = (pnlVal > 0 ? '+' : '') + pnlVal.toFixed(2);
     pnlEl.style.color = pnlVal >= 0 ? 'var(--g)' : 'var(--r)';
 
-    if (!data.history || data.history.length === 0) {
+    if (!data.history || !Array.isArray(data.history) || data.history.length === 0) {
       body.innerHTML = `<div class="ld" style="padding:40px">Belum ada riwayat transaksi yang terselesaikan.</div>`;
       return;
     }
@@ -909,18 +913,23 @@ async function loadTradeHistory() {
         <span>Waktu Selesai</span>
       </div>
       ` + data.history.map(t => {
-      const isWin = t.pnlUsdt >= 0;
+      if (!t || !t.symbol) return ''; // Lewati data korup
+      
+      const isWin = (t.pnlUsdt || 0) >= 0;
       const color = isWin ? 'var(--g)' : 'var(--r)';
-      const date = new Date(t.timestamp).toLocaleString('id-ID', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
+      const type = t.type || 'UNKNOWN';
+      const date = t.timestamp 
+        ? new Date(t.timestamp).toLocaleString('id-ID', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})
+        : '—';
       
       return `<div class="tr" style="grid-template-columns: 1fr 80px 100px 100px 120px 140px">
         <span style="font-weight:600">${t.symbol.replace('USDT','')}</span>
-        <span><span class="pill ${t.type.toLowerCase()}">${t.type}</span></span>
+        <span><span class="pill ${type.toLowerCase()}">${type}</span></span>
         <span>$${fmtP(t.entry)}</span>
         <span>$${fmtP(t.exit)}</span>
         <div style="display:flex; flex-direction:column">
-          <span style="color:${color}; font-weight:600">${isWin ? '+' : ''}${t.pnlUsdt} USDT</span>
-          <span style="color:${color}; font-size:9px">${isWin ? '+' : ''}${t.pnlPercent}%</span>
+          <span style="color:${color}; font-weight:600">${isWin ? '+' : ''}${t.pnlUsdt || 0} USDT</span>
+          <span style="color:${color}; font-size:9px">${isWin ? '+' : ''}${t.pnlPercent || 0}%</span>
         </div>
         <div style="display:flex; flex-direction:column">
            <span style="font-size:11px">${date}</span>
