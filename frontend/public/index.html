@@ -201,6 +201,9 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
   
   <div class="sb-label">TOP SIGNALS</div>
   <div id="sb-pairs"></div>
+  <div style="padding: 18px 20px; font-size: 10px; color: var(--tx3); text-align: center; border-top: 1px solid var(--br); margin-top: auto; opacity: 0.6;">
+    VERSION: 3.2.0-FIX
+  </div>
 </aside>
 
 <!-- ── Main ── -->
@@ -883,7 +886,7 @@ async function loadTradeHistory() {
   body.innerHTML = `<div class="ld"><div class="sp"></div><span>Memuat riwayat trading...</span></div>`;
   
   try {
-    const res = await fetch(`${API}/trade-history`);
+    const res = await fetch(`${API}/histori`);
     if (!res.ok) throw new Error(`Server Error: ${res.status}`);
     const data = await res.json();
     

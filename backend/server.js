@@ -1605,7 +1605,7 @@ app.get('/api/health', (_, res) => {
     status: 'ok',
     timestamp: Date.now(),
     pairs: WATCHLIST.length,
-    version: '2.7-LIVE',
+    version: '3.2.0-FIX',
     marketBaseURL: getMarketBaseUrl(),
     tradingBaseURL: getActiveBaseUrl(),
     wsStatus,
@@ -1687,7 +1687,7 @@ app.get('/api/debug-connection', async (req, res) => {
   }
 });
 
-app.get('/api/trade-history', (req, res) => {
+app.get('/api/histori', (req, res) => {
   const history = loadHistory();
   
   // Hitung stats kumulatif
