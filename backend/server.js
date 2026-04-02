@@ -361,6 +361,14 @@ async function executeBinanceTrade(signalData) {
     return;
   }
 
+  // Cek Target PnL Harian
+  const settings = loadSettings();
+  const currentPnL = getDailyPnL();
+  if (currentPnL >= settings.daily_pnl_target) {
+    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Target harian (${settings.daily_pnl_target} USDT) sudah tercapai. PnL Hari Ini: ${currentPnL.toFixed(2)} USDT`);
+    return;
+  }
+
   const { symbol, signal, price } = signalData;
 
   // Simbol TradFi-Perps (Commodity / Logam) memerlukan persetujuan khusus di Binance.
@@ -970,6 +978,36 @@ async function ensureExchangeAvailable() {
 // -------------------------------------------------------------
 const ACTIVE_TRADES_FILE = path.join(__dirname, 'active_trades.json');
 const TRADE_HISTORY_FILE = path.join(__dirname, 'trade_history.json');
+const SETTINGS_FILE = path.join(__dirname, 'settings.json');
+
+function loadSettings() {
+  if (fs.existsSync(SETTINGS_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+    } catch (e) {
+      console.error('[settings] Gagal membaca settings.json:', e.message);
+    }
+  }
+  return { daily_pnl_target: 10 }; // Default $10
+}
+
+function saveSettings(settings) {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[settings] Gagal menyimpan settings.json:', e.message);
+  }
+}
+
+function getDailyPnL() {
+  const history = loadHistory();
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  
+  return history
+    .filter(t => t.timestamp >= startOfDay)
+    .reduce((sum, t) => sum + (t.pnlUsdt || 0), 0);
+}
 
 function loadActiveTrades() {
   // Gunakan cache jika sudah tersedia
@@ -1320,6 +1358,7 @@ function checkTradeLevels(trade, currentPrice) {
         sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
         
         if (!trade.slMoved && process.env.TRADING_ENABLED === 'true') {
+          // SL+ Level 1: Geser ke Break-Even (Entry + 0.1%)
           moveStopLossToBreakEven(sym, trade.entry, trade.type).then(success => {
             if (success) {
               const activeTrades = loadActiveTrades();
@@ -1333,6 +1372,22 @@ function checkTradeLevels(trade, currentPrice) {
         }
       }
     }
+  }
+
+  // 5. Cek TP2 (Memicu SL+ Level 2: Geser ke TP1)
+  if (trade.hitTp2 && !trade.slMovedToTp1 && process.env.TRADING_ENABLED === 'true') {
+      const tp1Price = trade.tp1;
+      moveStopLossToBreakEven(sym, tp1Price / (isLong ? 1.001 : 0.999), trade.type).then(success => {
+          if (success) {
+              const activeTrades = loadActiveTrades();
+              if (activeTrades[sym]) {
+                  activeTrades[sym].slMovedToTp1 = true;
+                  activeTrades[sym].sl = tp1Price;
+                  saveActiveTrades(activeTrades);
+                  sendTelegramMessage(`🛡️ *SL+ UPGRADE: ${sym}* 🛡️\n\nTarget TP2 tercapai, Stop Loss digeser ke level TP1 (${tp1Price}) untuk mengamankan profit lebih besar!`);
+              }
+          }
+      });
   }
 
   return { modified: changed };
@@ -1408,6 +1463,22 @@ app.get('/api/live-prices', (req, res) => {
     prices: livePrices,
     wsStatus: wsStatus
   });
+});
+
+app.get('/api/settings', (req, res) => {
+    res.json({
+        ...loadSettings(),
+        current_daily_pnl: getDailyPnL()
+    });
+});
+
+app.post('/api/settings', (req, res) => {
+    const { daily_pnl_target } = req.body;
+    if (daily_pnl_target === undefined) return res.status(400).json({ error: 'Data tidak lengkap' });
+    
+    const settings = { daily_pnl_target: parseFloat(daily_pnl_target) };
+    saveSettings(settings);
+    res.json({ success: true, settings });
 });
 
 app.get('/api/debug-connection', async (req, res) => {
