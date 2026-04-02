@@ -688,7 +688,7 @@ function calcVWAP(klines) {
   return volume === 0 ? 0 : volumePrice / volume;
 }
 
-function generateSignal(indicators, price, fundingRate, interval = '1h') {
+function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0) {
   let score = 0;
   const reasons = [];
   const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap, atr } = indicators;
@@ -842,7 +842,7 @@ function generateSignal(indicators, price, fundingRate, interval = '1h') {
   const entry = price;
   
   // FIXED PROFIT SCALPING LOGIC
-  const fixedProfit = parseFloat(process.env.FIXED_PROFIT_USDT) || 0;
+  const fixedProfit = customFixedTp > 0 ? customFixedTp : (parseFloat(process.env.FIXED_PROFIT_USDT) || 0);
   const margin = parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
   const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
   const posValue = margin * leverage;
@@ -939,7 +939,7 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       markPrice: parseFloat(funding.markPrice),
       stochK: indicators.stochRSI.k,
       indicators,
-      signal: generateSignal(indicators, price, fundingRate, interval),
+      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt),
     };
 
     if (full) {
@@ -988,7 +988,10 @@ function loadSettings() {
       console.error('[settings] Gagal membaca settings.json:', e.message);
     }
   }
-  return { daily_pnl_target: 10 }; // Default $10
+  return { 
+    daily_pnl_target: 10,
+    fixed_tp_usdt: 0.5 // Default $0.5
+  };
 }
 
 function saveSettings(settings) {
@@ -1473,10 +1476,12 @@ app.get('/api/settings', (req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-    const { daily_pnl_target } = req.body;
-    if (daily_pnl_target === undefined) return res.status(400).json({ error: 'Data tidak lengkap' });
+    const { daily_pnl_target, fixed_tp_usdt } = req.body;
     
-    const settings = { daily_pnl_target: parseFloat(daily_pnl_target) };
+    const settings = loadSettings();
+    if (daily_pnl_target !== undefined) settings.daily_pnl_target = parseFloat(daily_pnl_target);
+    if (fixed_tp_usdt !== undefined) settings.fixed_tp_usdt = parseFloat(fixed_tp_usdt);
+    
     saveSettings(settings);
     res.json({ success: true, settings });
 });
