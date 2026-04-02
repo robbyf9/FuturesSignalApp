@@ -38,13 +38,7 @@ function parseBaseUrls() {
   );
 }
 
-const BINANCE_BASE_URLS = [
-  'https://fapi.binance.com',
-  'https://fapi1.binance.com',
-  'https://fapi2.binance.com',
-  'https://fapi3.binance.com',
-  'https://fapi.binance.us'
-];
+const BINANCE_BASE_URLS = parseBaseUrls();
 let activeBaseIndex = 0;
 
 // URL untuk Market Data (Scanner, Klines, Ticker) — SELALU gunakan mainnet/proxy
