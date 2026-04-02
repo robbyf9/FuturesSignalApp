@@ -321,6 +321,71 @@ let curFilter = 'all';
 let scanData = [];
 let pChart = null;
 let selPair = null;
+let lastPrices = {}; // Untuk deteksi naik/turun di UI
+
+// ─── Live Price Sync (Tanpa Hit Binance) ──────────────────────────────────────
+async function syncLivePrices() {
+  try {
+    const res = await fetch(`${API}/live-prices`);
+    if (!res.ok) return;
+    const { prices, wsStatus: status } = await res.json();
+    
+    // Update API Status
+    const dot = document.getElementById('api-status-dot');
+    const txt = document.getElementById('api-status-text');
+    dot.className = 'sdot ' + (status === 'CONNECTED' ? 'live' : 'error');
+    txt.textContent = status === 'CONNECTED' ? 'WS Live' : 'WS Down';
+
+    // Update Harga di Tabel Scanner yang terlihat
+    const rows = document.querySelectorAll('#sc-body .tr');
+    rows.forEach(row => {
+      const symCell = row.querySelector('span:first-child');
+      const prCell = row.querySelector('span:nth-child(2)');
+      if (!symCell || !prCell) return;
+      
+      const symbol = symCell.textContent.replace('/','');
+      const newPrice = prices[symbol];
+      
+      if (newPrice) {
+        const oldPrice = lastPrices[symbol] || 0;
+        const priceStr = '$' + fmtP(newPrice);
+        
+        // Animasi kilat (flash) jika harga berubah
+        if (newPrice > oldPrice) {
+          prCell.style.color = 'var(--g)';
+          setTimeout(() => prCell.style.color = '', 800);
+        } else if (newPrice < oldPrice) {
+          prCell.style.color = 'var(--r)';
+          setTimeout(() => prCell.style.color = '', 800);
+        }
+        
+        prCell.textContent = priceStr;
+        lastPrices[symbol] = newPrice;
+      }
+    });
+
+    // Update Detail View jika sedang dibuka
+    if (selPair && prices[selPair]) {
+      const livePrice = prices[selPair];
+      const mvEl = document.querySelector('#det-metrics .mc:first-child .mv');
+      if (mvEl) mvEl.textContent = '$' + fmtP(livePrice);
+    }
+  } catch (e) {
+    console.warn('Live sync failed:', e.message);
+  }
+}
+
+// Jalankan sync harga setiap 5 detik
+setInterval(syncLivePrices, 5000);
+
+// Auto-Refresh Signal setiap 5 menit agar data indikator tetap segar
+setInterval(() => {
+  const btn = document.getElementById('scan-btn');
+  if (!btn.disabled) {
+    console.log('[auto] Memulai scan otomatis...');
+    runScan();
+  }
+}, 300000);
 
 // ─── View ─────────────────────────────────────────────────────────────────────
 function showView(v) {

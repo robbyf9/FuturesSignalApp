@@ -1370,8 +1370,8 @@ async function monitorActiveTrades() {
   }
 }
 
-// Inisialisasi Cron Job Scanner
-const schedule = process.env.CRON_SCHEDULE || '0 * * * *'; 
+// Inisialisasi Cron Job Scanner - Default setiap 15 menit agar data selalu segar
+const schedule = process.env.CRON_SCHEDULE || '*/15 * * * *'; 
 if (process.env.TELEGRAM_BOT_TOKEN) {
   cron.schedule(schedule, () => {
     runBackgroundScanner();
@@ -1392,13 +1392,21 @@ app.get('/api/health', (_, res) => {
     status: 'ok',
     timestamp: Date.now(),
     pairs: WATCHLIST.length,
-    version: '2.6-DEBUG',
+    version: '2.7-LIVE',
     marketBaseURL: getMarketBaseUrl(),
     tradingBaseURL: getActiveBaseUrl(),
-    configuredBaseURLs: BINANCE_BASE_URLS,
+    wsStatus,
     tradingTimeframe: process.env.TRADING_TIMEFRAME || '1h',
-    tradingEnabled: process.env.TRADING_ENABLED === 'true',
-    useTestnet: process.env.USE_BINANCE_TESTNET === 'true'
+    tradingEnabled: process.env.TRADING_ENABLED === 'true'
+  });
+});
+
+app.get('/api/live-prices', (req, res) => {
+  // Mengirim harga terbaru dari WebSocket memory cache
+  res.json({
+    timestamp: Date.now(),
+    prices: livePrices,
+    wsStatus: wsStatus
   });
 });
 
