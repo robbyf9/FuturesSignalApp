@@ -358,7 +358,7 @@ async function moveStopLossToBreakEven(symbol, entryPrice, side) {
 
 async function executeBinanceTrade(signalData) {
   if (process.env.TRADING_ENABLED !== 'true' || !BINANCE_API_KEY || !BINANCE_SECRET_KEY) {
-    return;
+    return false;
   }
 
   // Cek Target PnL Harian
@@ -366,7 +366,7 @@ async function executeBinanceTrade(signalData) {
   const currentPnL = getDailyPnL();
   if (currentPnL >= settings.daily_pnl_target) {
     console.log(`[trade] Skip auto-trade ${signalData.symbol}: Target harian (${settings.daily_pnl_target} USDT) sudah tercapai. PnL Hari Ini: ${currentPnL.toFixed(2)} USDT`);
-    return;
+    return false;
   }
 
   const { symbol, signal, price } = signalData;
@@ -379,7 +379,7 @@ async function executeBinanceTrade(signalData) {
   ]);
   if (TRADFI_SYMBOLS.has(symbol)) {
     console.log(`[trade] Skip auto-trade ${symbol}: Simbol TradFi-Perps, perlu sign agreement di Binance terlebih dahulu.`);
-    return;
+    return false;
   }
 
   const side = signal.signal.includes('LONG') ? 'BUY' : 'SELL';
@@ -464,6 +464,7 @@ async function executeBinanceTrade(signalData) {
       
       console.log(`[trade] TP/SL Terpasang (via Algo): TP2 @ ${tpPrice}, SL @ ${slPrice}`);
       await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi di Binance Testnet beres!_`);
+      return true;
     }
 
   } catch (err) {
@@ -474,11 +475,12 @@ async function executeBinanceTrade(signalData) {
     if (msg && msg.toLowerCase().includes('tradfi') || msg.toLowerCase().includes('agreement') || errCode === -4185) {
       console.warn(`[trade] Skip ${symbol}: Perlu sign TradFi-Perps Agreement di Binance.com terlebih dahulu.`);
       await sendTelegramMessage(`ℹ️ *INFO AUTO-TRADE: ${symbol}*\n\nSimbol ini adalah produk TradFi-Perps (Commodity/Logam).\n\nUntuk mengaktifkan auto-trade, silakan sign agreement di:\nBinance Futures → ${symbol} → Accept Agreement\n\nScanner tetap aktif, sinyal tetap dikirim.`);
-      return;
+      return false;
     }
 
     console.error(`[trade] Gagal mengeksekusi order ${symbol}:`, msg);
     await sendTelegramMessage(`⚠️ *AUTO-TRADE FAILED* ⚠️\n\nKoin: ${symbol}\nError: ${msg}`);
+    return false;
   }
 }
 
@@ -1193,8 +1195,24 @@ async function runBackgroundScanner() {
             
             if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
               if (meetsConfidence) {
-                executeBinanceTrade(item);
-                currentOpenPositions++;
+                const success = await executeBinanceTrade(item);
+                if (success) {
+                  currentOpenPositions++;
+                  // HANYA simpan ke database lokal jika trade benar-benar dieksekusi di bursa
+                  activeTrades[item.symbol] = {
+                    symbol: item.symbol,
+                    type: currentType,
+                    entry: parseFloat(entry),
+                    tp1: parseFloat(item.signal.levels.tp1),
+                    tp2: parseFloat(item.signal.levels.tp2),
+                    tp3: parseFloat(item.signal.levels.tp3),
+                    sl: parseFloat(item.signal.levels.sl),
+                    hitTp1: false,
+                    hitTp2: false,
+                    timestamp: Date.now()
+                  };
+                  console.log(`[tracker] Start tracking: ${item.symbol}`);
+                }
               } else {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: Konfidensi (${item.signal.confidence}%) < target (${autoTradeMinConf}%)`);
               }
@@ -1204,20 +1222,6 @@ async function runBackgroundScanner() {
           } else {
             console.log(`[tracker] Update: ${item.symbol} tetap ${currentType}, notif diabaikan (anti-spam).`);
           }
-          
-          // Tetap update data TP/SL terbaru di database lokal agar tracker tetap akurat
-          activeTrades[item.symbol] = {
-            symbol: item.symbol,
-            type: currentType,
-            entry: parseFloat(entry),
-            tp1: parseFloat(item.signal.levels.tp1),
-            tp2: parseFloat(item.signal.levels.tp2),
-            tp3: parseFloat(item.signal.levels.tp3),
-            sl: parseFloat(item.signal.levels.sl),
-            hitTp1: existing ? existing.hitTp1 : false,
-            hitTp2: existing ? existing.hitTp2 : false,
-            timestamp: existing ? existing.timestamp : Date.now()
-          };
         }
       }
     }
