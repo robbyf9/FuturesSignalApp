@@ -361,11 +361,17 @@ async function executeBinanceTrade(signalData) {
     return false;
   }
 
-  // Cek Target PnL Harian
+  // Cek Target PnL Harian (Termasuk Floating)
   const settings = loadSettings();
-  const currentPnL = getDailyPnL();
-  if (currentPnL >= settings.daily_pnl_target) {
-    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Target harian (${settings.daily_pnl_target} USDT) sudah tercapai. PnL Hari Ini: ${currentPnL.toFixed(2)} USDT`);
+  const netPnL = await getNetDailyPnL();
+  
+  if (netPnL >= settings.daily_pnl_target) {
+    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Target profit harian (${settings.daily_pnl_target} USDT) sudah tercapai. Net PnL: ${netPnL.toFixed(2)} USDT`);
+    return false;
+  }
+  
+  if (netPnL <= -settings.daily_loss_limit) {
+    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Limit kerugian harian (-${settings.daily_loss_limit} USDT) sudah terlampaui. Net PnL: ${netPnL.toFixed(2)} USDT`);
     return false;
   }
 
@@ -1011,6 +1017,7 @@ function loadSettings() {
   }
   return { 
     daily_pnl_target: 10,
+    daily_loss_limit: 50, // Default $50
     fixed_tp_usdt: 0.5 // Default $0.5
   };
 }
@@ -1031,6 +1038,25 @@ function getDailyPnL() {
   return history
     .filter(t => t.timestamp >= startOfDay)
     .reduce((sum, t) => sum + (t.pnlUsdt || 0), 0);
+}
+
+/**
+ * Menghitung Total PnL Harian (Realized + Unrealized/Floating)
+ */
+async function getNetDailyPnL() {
+  const realized = getDailyPnL();
+  let unrealizedTotal = 0;
+  
+  try {
+    const activePositions = await getBinancePositions();
+    unrealizedTotal = activePositions.reduce((sum, pos) => {
+      return sum + (parseFloat(pos.unRealizedProfit) || 0);
+    }, 0);
+  } catch (err) {
+    console.error('[pnl] Gagal mengambil floating profit untuk kalkulasi Net PnL:', err.message);
+  }
+  
+  return realized + unrealizedTotal;
 }
 
 function loadActiveTrades() {
@@ -1627,24 +1653,27 @@ app.get('/api/live-prices', (req, res) => {
   });
 });
 
-app.get('/api/settings', (req, res) => {
+app.get('/api/settings', async (req, res) => {
     res.json({
         ...loadSettings(),
-        current_daily_pnl: getDailyPnL()
+        current_daily_pnl: await getNetDailyPnL(),
+        realized_daily_pnl: getDailyPnL()
     });
 });
 
 app.post('/api/settings', (req, res) => {
-    const { daily_pnl_target, fixed_tp_usdt } = req.body;
+    const { daily_pnl_target, daily_loss_limit, fixed_tp_usdt } = req.body;
     
     const settings = loadSettings();
     if (daily_pnl_target !== undefined) {
-        // Handle comma input
         const val = String(daily_pnl_target).replace(',', '.');
         settings.daily_pnl_target = parseFloat(val);
     }
+    if (daily_loss_limit !== undefined) {
+        const val = String(daily_loss_limit).replace(',', '.');
+        settings.daily_loss_limit = parseFloat(val);
+    }
     if (fixed_tp_usdt !== undefined) {
-        // Handle comma input
         const val = String(fixed_tp_usdt).replace(',', '.');
         settings.fixed_tp_usdt = parseFloat(val);
     }

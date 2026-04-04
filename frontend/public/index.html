@@ -191,6 +191,9 @@ body{background:var(--bg);color:var(--tx);font-family:'JetBrains Mono',monospace
     
     <div style="font-size:10px;color:var(--tx2);margin-bottom:5px">DAILY TARGET PnL ($)</div>
     <input type="number" id="target-input" class="daily-input" placeholder="Set Target ($)">
+
+    <div style="font-size:10px;color:var(--tx2);margin-bottom:5px;color:var(--r)">DAILY LOSS LIMIT ($)</div>
+    <input type="number" id="loss-input" class="daily-input" placeholder="Set Loss Limit ($)">
     
     <div style="font-size:10px;color:var(--tx2);margin-bottom:5px">FIXED TP PER TRADE ($)</div>
     <input type="number" id="fixed-tp-input" class="daily-input" step="0.1" placeholder="Set TP (e.g. 0.5)">
@@ -1020,6 +1023,71 @@ function fmtP(n) {
     : n.toFixed(4);
 }
 
+async function loadSettings() {
+  try {
+    const res = await fetch(`${API}/settings`);
+    const data = await res.json();
+    
+    document.getElementById('target-input').value = data.daily_pnl_target;
+    document.getElementById('loss-input').value = data.daily_loss_limit || 50;
+    document.getElementById('fixed-tp-input').value = data.fixed_tp_usdt;
+    
+    const current = data.current_daily_pnl || 0;
+    const realized = data.realized_daily_pnl || 0;
+    const target = data.daily_pnl_target || 10;
+    const lossLimit = data.daily_loss_limit || 50;
+    
+    const pct = Math.max(0, Math.min(100, (current / target) * 100));
+    document.getElementById('daily-progress').style.width = pct + '%';
+    document.getElementById('daily-val-display').innerHTML = 
+        `<span title="Net PnL (Realized + Floating)">$${current.toFixed(2)}</span> / $${target.toFixed(2)}`;
+    
+    // Warn if near loss limit
+    const dailyStatus = document.getElementById('daily-status');
+    if (current <= -lossLimit) {
+        dailyStatus.textContent = 'STOPPED (LOSS)';
+        dailyStatus.style.color = 'var(--r)';
+    } else if (current >= target) {
+        dailyStatus.textContent = 'TARGET HIT';
+        dailyStatus.style.color = 'var(--g)';
+    } else {
+        dailyStatus.textContent = 'RUNNING';
+        dailyStatus.style.color = 'var(--g)';
+    }
+
+    document.getElementById('config-summary').innerHTML = `
+      <span>Target: <b>$${target}</b></span>
+      <span>Limit: <b>$${lossLimit}</b></span>
+      <span>Fixed TP: <b>$${data.fixed_tp_usdt || 'ATR'}</b></span>
+      <span title="Realized Profit hari ini (Sudah terpotong loss)">Realized: <b style="color:var(--g)">$${realized.toFixed(2)}</b></span>
+    `;
+  } catch(e) {}
+}
+
+async function saveAllSettings() {
+  const target = document.getElementById('target-input').value;
+  const loss = document.getElementById('loss-input').value;
+  const fixed = document.getElementById('fixed-tp-input').value;
+  
+  try {
+    const res = await fetch(`${API}/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        daily_pnl_target: target,
+        daily_loss_limit: loss,
+        fixed_tp_usdt: fixed 
+      })
+    });
+    if (res.ok) {
+      alert('Pengaturan berhasil disimpan!');
+      loadSettings();
+    }
+  } catch(e) {
+    alert('Gagal menyimpan pengaturan');
+  }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   // Cek apakah server dalam mode scalping
@@ -1035,71 +1103,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   runScan();
   checkApiStatus();
-  loadDailySettings();
+  loadSettings();
 });
 
-async function loadDailySettings() {
-    try {
-        const res = await fetch(`${API}/settings`);
-        const data = await res.json();
-        
-        const target = data.daily_pnl_target || 10;
-        const fixedTp = data.fixed_tp_usdt || 0.5;
-        const current = data.current_daily_pnl || 0;
-        
-        document.getElementById('target-input').value = target;
-        document.getElementById('fixed-tp-input').value = fixedTp;
-        updateDailyUI(current, target);
-    } catch (e) {
-        console.error('Gagal load settings:', e);
-    }
-}
-
-async function saveAllSettings() {
-    let target = document.getElementById('target-input').value;
-    let fixedTp = document.getElementById('fixed-tp-input').value;
-    
-    // Auto-fix comma to dot
-    target = String(target).replace(',', '.');
-    fixedTp = String(fixedTp).replace(',', '.');
-    
-    try {
-        const res = await fetch(`${API}/settings`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                daily_pnl_target: target,
-                fixed_tp_usdt: fixedTp
-            })
-        });
-        if (res.ok) {
-            alert('Semua pengaturan berhasil disimpan!');
-            loadDailySettings();
-        }
-    } catch (e) {
-        alert('Gagal simpan pengaturan');
-    }
-}
-
-function updateDailyUI(current, target) {
-    const pct = Math.min(100, Math.max(0, (current / target) * 100));
-    document.getElementById('daily-progress').style.width = pct + '%';
-    document.getElementById('daily-val-display').textContent = `$${current.toFixed(2)} / $${parseFloat(target).toFixed(2)}`;
-    
-    const status = document.getElementById('daily-status');
-    if (current >= target) {
-        status.textContent = 'TARGET REACHED 🏁';
-        status.style.color = 'var(--g)';
-        document.getElementById('daily-progress').style.background = 'var(--g)';
-    } else {
-        status.textContent = 'RUNNING...';
-        status.style.color = 'var(--ac)';
-        document.getElementById('daily-progress').style.background = 'linear-gradient(90deg, var(--ac), var(--g))';
-    }
-}
 
 // Refresh status target setiap 1 menit
-setInterval(loadDailySettings, 60000);
+setInterval(loadSettings, 60000);
 </script>
 </body>
 </html>
