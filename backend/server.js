@@ -1291,7 +1291,7 @@ function initBinanceWebSocket() {
         // Cek trade yang sedang berjalan (menggunakan cache memori agar instan/irit)
         if (activeTrades[symbol]) {
           const trade = activeTrades[symbol];
-          const result = checkTradeLevels(trade, currentPrice);
+          const result = checkTradeLevels(trade, currentPrice, activeTrades);
           if (result.modified) {
             modified = true;
           }
@@ -1321,7 +1321,7 @@ function initBinanceWebSocket() {
 /**
  * Logika pengecekan TP/SL untuk satu koin (Sekali Terdeteksi Langsung Beraksi)
  */
-function checkTradeLevels(trade, currentPrice) {
+function checkTradeLevels(trade, currentPrice, activeTrades = null) {
   let changed = false;
   const isLong = trade.type === 'LONG';
   const sym = trade.symbol;
@@ -1345,7 +1345,6 @@ function checkTradeLevels(trade, currentPrice) {
   if (hitSl) {
     if (shouldNotify('SL')) {
       sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
-      const activeTrades = loadActiveTrades();
       
       // Simpan ke History sebelum dihapus
       saveToHistory({
@@ -1356,7 +1355,7 @@ function checkTradeLevels(trade, currentPrice) {
         reason: 'STOP LOSS'
       });
       
-      delete activeTrades[sym];
+      if (activeTrades) delete activeTrades[sym];
       // Hapus cache notif juga agar koin ini bisa di-trade lagi nanti
       delete lastNotified[`${sym}_SL`];
       delete lastNotified[`${sym}_TP1`];
@@ -1371,7 +1370,6 @@ function checkTradeLevels(trade, currentPrice) {
   if (hitTp3) {
     if (shouldNotify('TP3')) {
       sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
-      const activeTrades = loadActiveTrades();
       
       // Simpan ke History sebelum dihapus
       saveToHistory({
@@ -1382,7 +1380,7 @@ function checkTradeLevels(trade, currentPrice) {
         reason: 'TAKE PROFIT (TP3)'
       });
       
-      delete activeTrades[sym];
+      if (activeTrades) delete activeTrades[sym];
       return { modified: true };
     }
   }
@@ -1603,7 +1601,7 @@ async function monitorActiveTrades() {
         const trade = activeTrades[sym];
         const currentPrice = priceMap[sym];
         if (!currentPrice) continue;
-        const res = checkTradeLevels(trade, currentPrice);
+        const res = checkTradeLevels(trade, currentPrice, activeTrades);
         if (res.modified) modified = true;
       }
       if (modified) saveActiveTrades(activeTrades);
