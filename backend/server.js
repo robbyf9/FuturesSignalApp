@@ -1805,6 +1805,7 @@ app.get('/api/cron-run', async (req, res) => {
 
 app.get('/api/active-trades', async (req, res) => {
   try {
+    const activeTrades = loadActiveTrades();
     const [positions, openOrders] = await Promise.all([
       getBinancePositions(),
       getBinanceOpenOrders()
