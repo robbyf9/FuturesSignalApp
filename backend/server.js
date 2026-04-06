@@ -337,16 +337,15 @@ async function moveStopLossToBreakEven(symbol, entryPrice, side) {
     const finalBePrice = parseFloat(bePrice.toFixed(precision.price));
     
     const slParams = signRequest({
-      algoType: 'CONDITIONAL',
       symbol,
       side: isLong ? 'SELL' : 'BUY',
       type: 'STOP_MARKET',
-      triggerPrice: finalBePrice,
+      stopPrice: finalBePrice,
       closePosition: 'true',
       workingType: 'MARK_PRICE'
     });
     
-    await tradingApi.post('/fapi/v1/algoOrder', slParams);
+    await tradingApi.post('/fapi/v1/order', slParams);
     
     console.log(`[trade] SL Moved to Break-Even: ${symbol} @ ${finalBePrice}`);
     await sendTelegramMessage(`🛡️ *SL PLUS ACTIVATED: ${symbol}* 🛡️\n\nStop Loss telah digeser ke harga Entry (${finalBePrice}) untuk mengunci keuntungan. Trade ini sekarang aman dari kerugian (Risk-Free)!`);
@@ -439,38 +438,36 @@ async function executeBinanceTrade(signalData) {
     const mainOrder = await tradingApi.post('/fapi/v1/order', orderParams);
     console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId}`);
 
-    // 4. TP & SL (MENGGUNAKAN NEW ALGO ORDER ENDPOINT)
-    // Sejak Des 2024, TP/SL Market wajib lewat /fapi/v1/algoOrder
+    // 4. TP & SL (MENGGUNAKAN STANDAR ORDER)
+    // Gunakan standar fapi/v1/order agar tersinkronisasi dengan open orders
     if (signal.levels) {
       const tpPrice = parseFloat(signal.levels.tp2).toFixed(precision.price);
       const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
 
-      // TP Order (Take Profit Market via Algo)
+      // TP Order (Take Profit Market)
       const tpParams = signRequest({
-        algoType: 'CONDITIONAL',
         symbol,
         side: oppositeSide,
         type: 'TAKE_PROFIT_MARKET',
-        triggerPrice: tpPrice,
+        stopPrice: tpPrice,
         closePosition: 'true',
         workingType: 'MARK_PRICE'
       });
-      await tradingApi.post('/fapi/v1/algoOrder', tpParams);
+      await tradingApi.post('/fapi/v1/order', tpParams);
 
-      // SL Order (Stop Market via Algo)
+      // SL Order (Stop Market)
       const slParams = signRequest({
-        algoType: 'CONDITIONAL',
         symbol,
         side: oppositeSide,
         type: 'STOP_MARKET',
-        triggerPrice: slPrice,
+        stopPrice: slPrice,
         closePosition: 'true',
         workingType: 'MARK_PRICE'
       });
-      await tradingApi.post('/fapi/v1/algoOrder', slParams);
+      await tradingApi.post('/fapi/v1/order', slParams);
       
-      console.log(`[trade] TP/SL Terpasang (via Algo): TP2 @ ${tpPrice}, SL @ ${slPrice}`);
-      await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi di Binance Testnet beres!_`);
+      console.log(`[trade] TP/SL Terpasang: TP2 @ ${tpPrice}, SL @ ${slPrice}`);
+      await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi Berhasil!_`);
       return true;
     }
 
@@ -1266,6 +1263,8 @@ async function runBackgroundScanner() {
                     tp2: parseFloat(item.signal.levels.tp2),
                     tp3: parseFloat(item.signal.levels.tp3),
                     sl: parseFloat(item.signal.levels.sl),
+                    margin: usdtAmount,
+                    leverage: leverage,
                     hitTp1: false,
                     hitTp2: false,
                     timestamp: Date.now()
@@ -1482,6 +1481,7 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
           const newSlPrice = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
           
           // Ganti SL di Binance
+          // Ganti SL di Binance ke harga baru (tanpa margin double)
           moveStopLossToBreakEven(sym, newSlPrice / (isLong ? 1.001 : 0.999), trade.type).then(success => {
              if (success) {
                  const activeTrades = loadActiveTrades();
@@ -1489,7 +1489,7 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
                      activeTrades[sym].last_pnl_step = currentStep;
                      activeTrades[sym].sl = newSlPrice;
                      saveActiveTrades(activeTrades);
-                     sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit mencapai $${pnlUsdt.toFixed(2)}. Stop Loss digeser ke level profit $${targetProfitUsdt.toFixed(2)} ($${fmtP(newSlPrice)})`);
+                     sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit mencapai $${pnlUsdt.toFixed(2)}. Stop Loss digeser ke $${fmtP(newSlPrice)} (+=$${step.toFixed(1)})`);
                  }
              }
           });
@@ -1839,6 +1839,7 @@ app.get('/api/active-trades', async (req, res) => {
         leverage: pos.leverage,
         tp: tpOrder ? parseFloat(tpOrder.stopPrice) : null,
         sl: slOrder ? parseFloat(slOrder.stopPrice) : null,
+        last_pnl_step: activeTrades[sym]?.last_pnl_step || 0,
         timestamp: Date.now()
       };
     });
