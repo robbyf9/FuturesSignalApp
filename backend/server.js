@@ -1378,22 +1378,8 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
     if (shouldNotify('SL')) {
       sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
       
-      // Simpan ke History sebelum dihapus
-      saveToHistory({
-        symbol: sym,
-        type: trade.type,
-        entry: trade.entry,
-        exit: currentPrice,
-        reason: 'STOP LOSS'
-      });
-      
-      if (activeTrades) delete activeTrades[sym];
-      // Hapus cache notif juga agar koin ini bisa di-trade lagi nanti
-      delete lastNotified[`${sym}_SL`];
-      delete lastNotified[`${sym}_TP1`];
-      delete lastNotified[`${sym}_TP2`];
-      delete lastNotified[`${sym}_TP3`];
-      return { modified: true };
+      // Bot tidak menghapus trade di sini, biarkan monitorActiveTrades yang beraksi jika posisi benar-benar hilang di bursa
+      return { modified: false }; // Tidak ada perubahan state memori yang mendesak
     }
   }
 
@@ -1403,17 +1389,8 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
     if (shouldNotify('TP3')) {
       sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
       
-      // Simpan ke History sebelum dihapus
-      saveToHistory({
-        symbol: sym,
-        type: trade.type,
-        entry: trade.entry,
-        exit: currentPrice,
-        reason: 'TAKE PROFIT (TP3)'
-      });
-      
-      if (activeTrades) delete activeTrades[sym];
-      return { modified: true };
+      // Bot tidak menghapus trade di sini, biarkan monitorActiveTrades yang beraksi jika posisi benar-benar hilang di bursa
+      return { modified: false };
     }
   }
 
@@ -1603,22 +1580,22 @@ async function monitorActiveTrades() {
 
     for (const sym of symbols) {
       if (!liveSymbols.includes(sym)) {
-        // Koin ini ada di catatan bot, tapi sudah tidak ada di bursa (Berarti sudah ditutup manual)
+        // Koin ini ada di catatan bot, tapi sudah tidak ada di bursa (Berarti sudah ditutup manual/TP/SL)
         const trade = activeTrades[sym];
-        const exitPrice = livePrices[sym] || trade.entry; // Pakai harga live terakhir
+        const currentPrice = livePrices[sym] || trade.entry;
+        const isLong = trade.type === 'LONG';
         
-        console.log(`[history] Mandeteksi penutupan manual: ${sym}`);
-        saveToHistory({
-          symbol: sym,
-          type: trade.type,
-          entry: trade.entry,
-          exit: exitPrice,
-          reason: 'Manual/External Close'
-        });
+        console.log(`[monitor] ${sym} sudah tertutup di bursa. Memindahkan ke history.`);
         
+        // Tentukan alasan penutupan berdasarkan harga saat ini (estimasi)
+        let reason = 'MARKET / MANUAL';
+        if (trade.sl && (isLong ? currentPrice <= trade.sl : currentPrice >= trade.sl)) reason = 'STOP LOSS';
+        if (trade.tp3 && (isLong ? currentPrice >= trade.tp3 : currentPrice <= trade.tp3)) reason = 'TAKE PROFIT';
+
+        await saveToHistory(trade, currentPrice, reason);
         delete activeTrades[sym];
         historyChanged = true;
-        sendTelegramMessage(`ℹ️ *TRADE CLOSED (EXTERNAL): ${sym}* ℹ️\n\nPosisi dideteksi telah ditutup secara manual atau oleh sistem bursa eksternal. Data telah dipindahkan ke History.`);
+        sendTelegramMessage(`ℹ️ *TRADE CLOSED: ${sym}* ℹ️\n\nPosisi telah ditutup (${reason}). Data telah dipindahkan ke History.`);
       }
     }
     
