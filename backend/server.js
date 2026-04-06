@@ -342,7 +342,7 @@ async function moveStopLossToBreakEven(symbol, entryPrice, side) {
       type: 'STOP_MARKET',
       stopPrice: finalBePrice,
       closePosition: 'true',
-      workingType: 'MARK_PRICE'
+      workingType: 'CONTRACT_PRICE'
     });
     
     await tradingApi.post('/fapi/v1/order', slParams);
@@ -451,7 +451,7 @@ async function executeBinanceTrade(signalData) {
         type: 'TAKE_PROFIT_MARKET',
         stopPrice: tpPrice,
         closePosition: 'true',
-        workingType: 'MARK_PRICE'
+        workingType: 'CONTRACT_PRICE'
       });
       await tradingApi.post('/fapi/v1/order', tpParams);
 
@@ -462,7 +462,7 @@ async function executeBinanceTrade(signalData) {
         type: 'STOP_MARKET',
         stopPrice: slPrice,
         closePosition: 'true',
-        workingType: 'MARK_PRICE'
+        workingType: 'CONTRACT_PRICE'
       });
       await tradingApi.post('/fapi/v1/order', slParams);
       
@@ -1180,11 +1180,11 @@ async function sendToTelegram(signalData) {
   const emoji = signalText.includes('LONG') ? '🟢' : (signalText.includes('SHORT') ? '🔴' : '⚪');
   const entry = signalData.market ? signalData.market.price : signalData.price;
 
-  const text = `🚨 *SIGNAL ALERT: ${signalData.symbol}* ${emoji}
+  const text = `📡 *[SCANNER] SIGNAL ALERT: ${signalData.symbol}* ${emoji}
   
 Tipe: *${signalText}* (Skor: ${signalData.signal.score})
 Confidence: ${signalData.signal.confidence}%
-Harga Entry: ${entry}
+ Harga Entry: ${entry}
 
 🎯 *TARGET:*
 TP 1: ${signalData.signal.levels.tp1}
@@ -1192,7 +1192,9 @@ TP 2: ${signalData.signal.levels.tp2}
 TP 3: ${signalData.signal.levels.tp3}
 
 🛑 *STOP LOSS:* ${signalData.signal.levels.sl}
-⚖️ RR Ratio: ${signalData.signal.levels.rr}`;
+⚖️ RR Ratio: ${signalData.signal.levels.rr}
+
+_⚠️ Catatan: Sinyal ini hanya alert manual. Auto-trade memerlukan Confidence >= 80%._`;
 
   const sent = await sendTelegramMessage(text);
   if (sent) console.log(`[telegram] Sinyal ${signalData.symbol} berhasil dikirim ke Telegram.`);
@@ -1367,6 +1369,8 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
     return true;
   }
 
+  if (trade.pendingClosure) return { modified: false };
+
   const pnl = isLong 
     ? ((currentPrice - trade.entry) / trade.entry) * 100 
     : ((trade.entry - currentPrice) / trade.entry) * 100;
@@ -1378,8 +1382,9 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
     if (shouldNotify('SL')) {
       sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
       
-      // Bot tidak menghapus trade di sini, biarkan monitorActiveTrades yang beraksi jika posisi benar-benar hilang di bursa
-      return { modified: false }; // Tidak ada perubahan state memori yang mendesak
+      // Tandai sebagai pending closure agar tidak spam notif selagi nunggu di-sync lewat monitorActiveTrades
+      trade.pendingClosure = true;
+      return { modified: true };
     }
   }
 
@@ -1389,8 +1394,9 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
     if (shouldNotify('TP3')) {
       sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
       
-      // Bot tidak menghapus trade di sini, biarkan monitorActiveTrades yang beraksi jika posisi benar-benar hilang di bursa
-      return { modified: false };
+      // Tandai sebagai pending closure
+      trade.pendingClosure = true;
+      return { modified: true };
     }
   }
 
