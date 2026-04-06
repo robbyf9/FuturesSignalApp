@@ -64,6 +64,7 @@ let wsConnection = null;
 let wsStatus = 'DISCONNECTED';
 let cachedActiveTrades = null; // Cache untuk cegah I/O berlebih
 let lastNotified = {}; // Tracker anti-spam notifikasi (symbol_type -> timestamp)
+const recentlyClosed = new Map(); // Cache anti-duplicate (symbol -> timestamp)
 
 function rotateBaseUrl() {
   if (BINANCE_BASE_URLS.length <= 1) return false;
@@ -1041,6 +1042,34 @@ function getDailyPnL() {
 }
 
 /**
+ * Menghitung Statistik PnL (Profit & Loss) untuk periode tertentu
+ * @param {number} days - Jumlah hari ke belakang
+ */
+function getPnLStats(days = 1) {
+  const history = loadHistory();
+  const now = Date.now();
+  const startTime = now - (days * 24 * 60 * 60 * 1000);
+  
+  const filtered = history.filter(t => t.timestamp >= startTime);
+  
+  const profit = filtered
+    .filter(t => (t.pnlUsdt || 0) > 0)
+    .reduce((sum, t) => sum + t.pnlUsdt, 0);
+    
+  const loss = filtered
+    .filter(t => (t.pnlUsdt || 0) < 0)
+    .reduce((sum, t) => sum + Math.abs(t.pnlUsdt), 0);
+    
+  return {
+    period: days === 1 ? 'Daily' : (days === 7 ? 'Weekly' : 'Monthly'),
+    profit: parseFloat(profit.toFixed(2)),
+    loss: parseFloat(loss.toFixed(2)),
+    net: parseFloat((profit - loss).toFixed(2)),
+    count: filtered.length
+  };
+}
+
+/**
  * Menghitung Total PnL Harian (Realized + Unrealized/Floating)
  */
 async function getNetDailyPnL() {
@@ -1113,6 +1142,10 @@ function saveToHistory(trade) {
     pnlUsdt: parseFloat(pnlUsdt.toFixed(2)),
     timestamp: Date.now()
   };
+
+  // Anti-Duplicate: Catat koin ini baru saja ditutup (Cooldown 5 menit)
+  recentlyClosed.set(trade.symbol, Date.now());
+  setTimeout(() => recentlyClosed.delete(trade.symbol), 300000);
 
   history.unshift(entry); // Masukkan ke paling depan
   // Simpan maksimal 200 trade terakhir agar tidak bengkak filenya
@@ -1510,6 +1543,12 @@ async function adoptOrphanPositions() {
     
     for (const pos of positions) {
       const sym = pos.symbol;
+      
+      // SKIP jika koin baru saja ditutup (Cegah duplikasi history)
+      if (recentlyClosed.has(sym)) {
+        continue;
+      }
+
       if (!activeTrades[sym] && WATCHLIST.includes(sym)) {
         // Ditemukan posisi manual yang koinnya ada di watchlist
         const side = parseFloat(pos.positionAmt) > 0 ? 'LONG' : 'SHORT';
@@ -1733,6 +1772,11 @@ app.get('/api/histori', (req, res) => {
       winRate: totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(1) : 0,
       totalPnL: totalPnL.toFixed(2),
       currency: 'USDT'
+    },
+    periods: {
+      daily: getPnLStats(1),
+      weekly: getPnLStats(7),
+      monthly: getPnLStats(30)
     }
   });
 });
