@@ -474,6 +474,7 @@ async function executeBinanceTrade(signalData) {
   } catch (err) {
     const msg = err.response?.data?.msg || err.message;
     const errCode = err.response?.data?.code;
+    const fullError = JSON.stringify(err.response?.data || {});
 
     // Deteksi error Agreement TradFi-Perps dari Binance
     if (msg && msg.toLowerCase().includes('tradfi') || msg.toLowerCase().includes('agreement') || errCode === -4185) {
@@ -482,7 +483,7 @@ async function executeBinanceTrade(signalData) {
       return false;
     }
 
-    console.error(`[trade] Gagal mengeksekusi order ${symbol}:`, msg);
+    console.error(`[trade] Gagal mengeksekusi order ${symbol}:`, msg, fullError);
     await sendTelegramMessage(`⚠️ *AUTO-TRADE FAILED* ⚠️\n\nKoin: ${symbol}\nError: ${msg}`);
     return false;
   }
@@ -1585,9 +1586,11 @@ async function monitorActiveTrades() {
     let historyChanged = false;
 
     for (const sym of symbols) {
+      const trade = activeTrades[sym];
+      const livePos = rawPositions.find(p => p.symbol === sym);
+      
       if (!liveSymbols.includes(sym)) {
         // Koin ini ada di catatan bot, tapi sudah tidak ada di bursa (Berarti sudah ditutup manual/TP/SL)
-        const trade = activeTrades[sym];
         const currentPrice = livePrices[sym] || trade.entry;
         const isLong = trade.type === 'LONG';
         
@@ -1602,6 +1605,41 @@ async function monitorActiveTrades() {
         delete activeTrades[sym];
         historyChanged = true;
         sendTelegramMessage(`ℹ️ *TRADE CLOSED: ${sym}* ℹ️\n\nPosisi telah ditutup (${reason}). Data telah dipindahkan ke History.`);
+      } else if (livePos && process.env.TRADING_ENABLED === 'true') {
+        // SELF-HEALING: Jika posisi terbuka tapi TP/SL tidak ada di bursa, pasang ulang
+        const coinOrders = openOrders.filter(o => o.symbol === sym);
+        const hasTp = coinOrders.some(o => o.type === 'TAKE_PROFIT_MARKET');
+        const hasSl = coinOrders.some(o => o.type === 'STOP_MARKET');
+
+        if (!hasTp && trade.tp2) {
+          console.log(`[self-healing] Menemukan TP hilang untuk ${sym}. Memasang ulang...`);
+          const info = await getExchangeInfo();
+          const prec = getSymbolPrecision(sym, info);
+          const tpParams = signRequest({
+            symbol: sym,
+            side: trade.type === 'LONG' ? 'SELL' : 'BUY',
+            type: 'TAKE_PROFIT_MARKET',
+            stopPrice: parseFloat(trade.tp2).toFixed(prec.price),
+            closePosition: 'true',
+            workingType: 'CONTRACT_PRICE'
+          });
+          await tradingApi.post('/fapi/v1/order', tpParams).catch(e => console.error(`[self-healing] Gagal pasang TP ${sym}:`, e.message));
+        }
+
+        if (!hasSl && trade.sl) {
+          console.log(`[self-healing] Menemukan SL hilang untuk ${sym}. Memasang ulang...`);
+          const info = await getExchangeInfo();
+          const prec = getSymbolPrecision(sym, info);
+          const slParams = signRequest({
+            symbol: sym,
+            side: trade.type === 'LONG' ? 'SELL' : 'BUY',
+            type: 'STOP_MARKET',
+            stopPrice: parseFloat(trade.sl).toFixed(prec.price),
+            closePosition: 'true',
+            workingType: 'CONTRACT_PRICE'
+          });
+          await tradingApi.post('/fapi/v1/order', slParams).catch(e => console.error(`[self-healing] Gagal pasang SL ${sym}:`, e.message));
+        }
       }
     }
     
