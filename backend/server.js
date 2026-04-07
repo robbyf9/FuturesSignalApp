@@ -157,10 +157,15 @@ let WATCHLIST = [
 async function updateWatchlist() {
   try {
     const { data } = await safeGet('/fapi/v1/ticker/24hr');
+    const blacklist = (process.env.SYMBOL_BLACKLIST || '').split(',').map(s => s.trim().toUpperCase());
+    
     const eligible = data
       .filter((item) => {
         const symbol = item.symbol;
         if (!symbol.endsWith('USDT') || symbol.includes('_')) return false;
+        
+        // Anti-Blacklist check
+        if (blacklist.includes(symbol)) return false;
 
         // EXCLUDE LEVERAGED TOKENS (BULL, BEAR, UP, DOWN)
         const isLeveraged = /BULL|BEAR|UP|DOWN/.test(symbol);
@@ -168,8 +173,8 @@ async function updateWatchlist() {
            return false;
         }
 
-        // Gunakan threshold volume dari .env (default list minimal 30jt USDT)
-        const minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT) || 30000000;
+        // Professional Volume Threshold (Default List: 50jt USDT)
+        const minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT) || 50000000;
         return parseFloat(item.quoteVolume) >= minVol;
       })
       .map((item) => item.symbol);
@@ -177,12 +182,14 @@ async function updateWatchlist() {
     if (eligible.length > 0) {
       WATCHLIST = eligible;
       console.log(`[system] Watchlist diperbarui otomatis: ${WATCHLIST.length} koin siap discan.`);
-      console.log(`[system] Koin: ${WATCHLIST.slice(0, 10).join(', ')}${WATCHLIST.length > 10 ? '...' : ''}`);
     }
   } catch (error) {
     console.error('[system] Gagal memperbarui watchlist otomatis:', error.message);
   }
 }
+
+// Auto-refresh watchlist every 4 hours
+setInterval(updateWatchlist, 4 * 60 * 60 * 1000);
 
 
 // Axios instance untuk MARKET DATA — selalu pakai mainnet/proxy
@@ -1077,6 +1084,14 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     const klines4h = klines4hRes.data;
     const ticker = tickerRes.data;
     const funding = fundingRes.data;
+
+    // 1b. Liquidity Verification (24h Volume)
+    const quoteVol24h = parseFloat(ticker.quoteVolume);
+    const minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT) || 50000000;
+    if (quoteVol24h < minVol && !full) {
+      console.log(`[analyze] Skip ${symbol}: Volume 24jam ($${(quoteVol24h/1000000).toFixed(1)}M) di bawah batas ($${(minVol/1000000).toFixed(1)}M)`);
+      return { symbol, skip: true, reason: 'LOW_LIQUIDITY' };
+    }
 
     if (!Array.isArray(klines) || klines.length === 0) {
       throw new Error(`No kline data returned for ${symbol}`);
