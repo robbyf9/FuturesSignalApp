@@ -54,7 +54,7 @@ function getActiveBaseUrl() {
   const USE_TESTNET = process.env.USE_BINANCE_TESTNET === 'true';
   const defaultTestnet = 'https://fapi-testnet.binance.com';
 
-  if (USE_TESTNET) return defaultTestnet;
+  if (USE_TESTNET) return 'https://testnet.binancefuture.com';
   return getMarketBaseUrl();
 }
 
@@ -436,42 +436,53 @@ async function executeBinanceTrade(signalData) {
     });
     
     const mainOrder = await tradingApi.post('/fapi/v1/order', orderParams);
-    console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId}`);
+      console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId}`);
 
-    // 4. TP & SL (MENGGUNAKAN STANDAR ORDER)
-    // Gunakan standar fapi/v1/order agar tersinkronisasi dengan open orders
-    if (signal.levels) {
-      const tpPrice = parseFloat(signal.levels.tp2).toFixed(precision.price);
-      const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
+      // 4. TP & SL (MENGGUNAKAN STANDAR ORDER)
+      // Jika Signal memiliki levels, pasang TP/SL
+      if (signal.levels) {
+        const tpPrice = parseFloat(signal.levels.tp2).toFixed(precision.price);
+        const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
 
-      // TP Order (Take Profit Market)
-      const tpParams = signRequest({
-        symbol,
-        side: oppositeSide,
-        type: 'TAKE_PROFIT_MARKET',
-        stopPrice: tpPrice,
-        closePosition: 'true',
-        workingType: 'CONTRACT_PRICE'
-      });
-      await tradingApi.post('/fapi/v1/order', tpParams);
+        try {
+          // TP Order (Take Profit Market)
+          const tpParams = signRequest({
+            symbol,
+            side: oppositeSide,
+            type: 'TAKE_PROFIT_MARKET',
+            stopPrice: tpPrice,
+            closePosition: 'true',
+            workingType: 'CONTRACT_PRICE'
+          });
+          await tradingApi.post('/fapi/v1/order', tpParams);
+          console.log(`[trade] TP Terpasang: TP2 @ ${tpPrice}`);
+        } catch (tpErr) {
+          console.error(`[trade] Gagal pasang TP ${symbol}:`, tpErr.response?.data?.msg || tpErr.message);
+        }
 
-      // SL Order (Stop Market)
-      const slParams = signRequest({
-        symbol,
-        side: oppositeSide,
-        type: 'STOP_MARKET',
-        stopPrice: slPrice,
-        closePosition: 'true',
-        workingType: 'CONTRACT_PRICE'
-      });
-      await tradingApi.post('/fapi/v1/order', slParams);
-      
-      console.log(`[trade] TP/SL Terpasang: TP2 @ ${tpPrice}, SL @ ${slPrice}`);
-      await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi Berhasil!_`);
-      return true;
-    }
+        try {
+          // SL Order (Stop Market)
+          const slParams = signRequest({
+            symbol,
+            side: oppositeSide,
+            type: 'STOP_MARKET',
+            stopPrice: slPrice,
+            closePosition: 'true',
+            workingType: 'CONTRACT_PRICE'
+          });
+          await tradingApi.post('/fapi/v1/order', slParams);
+          console.log(`[trade] SL Terpasang: SL @ ${slPrice}`);
+        } catch (slErr) {
+          console.error(`[trade] Gagal pasang SL ${symbol}:`, slErr.response?.data?.msg || slErr.message);
+        }
 
-  } catch (err) {
+        await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi Berhasil!_`);
+      } else {
+        await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED (No TP/SL)* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\n\n_Eksekusi Berhasil! Bot akan memantau via Self-Healing._`);
+      }
+
+      return true; // Berhasil Entry = Berhasil Trade (Lacak agar tidak lebih dari 5)
+    } catch (err) {
     const msg = err.response?.data?.msg || err.message;
     const errCode = err.response?.data?.code;
     const fullError = JSON.stringify(err.response?.data || {});
@@ -1582,6 +1593,7 @@ async function monitorActiveTrades() {
   // Sync dengan posisi riel di Binance untuk mendeteksi penutupan manual
   try {
     const rawPositions = await getBinancePositions();
+    const openOrders = await getBinanceOpenOrders(); // Fix: Tambahkan fetch open orders
     const liveSymbols = rawPositions.map(p => p.symbol);
     let historyChanged = false;
 
