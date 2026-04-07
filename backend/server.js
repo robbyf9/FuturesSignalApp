@@ -568,7 +568,7 @@ function calcEMA(closes, period) {
 }
 
 function calcMACD(closes) {
-  if (closes.length < 35) return { macd: 0, signal: 0, histogram: 0 };
+  if (closes.length < 35) return { macd: 0, signal: 0, histogram: 0, prevHistogram: 0 };
 
   const macdSeries = [];
   for (let i = 26; i <= closes.length; i += 1) {
@@ -579,10 +579,14 @@ function calcMACD(closes) {
   const macdLine = macdSeries[macdSeries.length - 1];
   const signalLine = macdSeries.length >= 9 ? calcEMA(macdSeries, 9) : macdLine * 0.85;
 
+  const prevMacdLine = macdSeries[macdSeries.length - 2];
+  const prevSignalLine = macdSeries.length >= 10 ? calcEMA(macdSeries.slice(0, -1), 9) : prevMacdLine * 0.85;
+
   return {
     macd: parseFloat(macdLine.toFixed(8)),
     signal: parseFloat(signalLine.toFixed(8)),
     histogram: parseFloat((macdLine - signalLine).toFixed(8)),
+    prevHistogram: parseFloat((prevMacdLine - prevSignalLine).toFixed(8)),
   };
 }
 
@@ -752,12 +756,20 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
   // 2. MACD Logic
   if (macd.macd > macd.signal) {
     score += 2;
-    if (isScalp && macd.histogram > 0) score += 1;
-    reasons.push('MACD bullish crossover');
+    if (macd.histogram > macd.prevHistogram) {
+      score += 1;
+      reasons.push('MACD bullish (Rising momentum)');
+    } else {
+      reasons.push('MACD bullish crossover');
+    }
   } else if (macd.macd < macd.signal) {
     score -= 2;
-    if (isScalp && macd.histogram < 0) score -= 1;
-    reasons.push('MACD bearish crossover');
+    if (macd.histogram < macd.prevHistogram) {
+      score -= 1;
+      reasons.push('MACD bearish (Falling momentum)');
+    } else {
+      reasons.push('MACD bearish crossover');
+    }
   }
 
   // 3. TREND FILTER (EMA 200 & EMA 9/21/50)
@@ -792,15 +804,18 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
 
   // 3a. ADX TREND STRENGTH
   const { adx, plusDI, minusDI } = indicators.adxInfo || { adx: 0 };
+  let sidewaysPenalty = false;
+  
   if (adx > 25) {
     score += 1;
     reasons.push(`Strong trend (ADX: ${adx})`);
     if (plusDI > minusDI) score += 1;
     else score -= 1;
   } else if (adx < 20) {
-    // Sideways market - avoid trend followers, reduce scores
-    score = score * 0.7; 
-    reasons.push(`Weak trend (ADX: ${adx}), being cautious`);
+    // Sideways market - avoid trend followers, reduce scores drastically
+    score = score * 0.5; 
+    sidewaysPenalty = true;
+    reasons.push(`Weak trend (ADX: ${adx}), STRICT penalty applied`);
   }
 
   // 4. Bollinger Bands
@@ -829,12 +844,25 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     score -= 1;
   }
 
+  const distanceToVwap = Math.abs(price - vwap);
+  const isOverExtended = distanceToVwap > (atr * 2.5);
+
   if (price > vwap) {
-    score += 1;
-    reasons.push('Price above VWAP');
+    if (isOverExtended) {
+      score -= 3;
+      reasons.push('Over-extended above VWAP (Avoid FOMO)');
+    } else {
+      score += 1;
+      reasons.push('Price gently above VWAP');
+    }
   } else {
-    score -= 1;
-    reasons.push('Price below VWAP');
+    if (isOverExtended) {
+      score += 3;
+      reasons.push('Over-extended below VWAP (Avoid FOMO)');
+    } else {
+      score -= 1;
+      reasons.push('Price gently below VWAP');
+    }
   }
 
   if (fundingRate < -0.05) {
@@ -879,6 +907,11 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     confidence = Math.min(65, 48 + Math.abs(score) * 3);
   }
 
+  // Cap confidence if sideways trend is detected to prevent auto-trading
+  if (sidewaysPenalty) {
+    confidence = Math.min(confidence, 75);
+  }
+
   const isLong = score >= 0;
   const entry = price;
   
@@ -898,16 +931,28 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
   const factor3 = isScalp ? 3.5 : 5.0;
   const slFactor = isScalp ? 1.5 : 2.0;
 
+  // Dynamic ATR Clamping for SL/TP
+  let atrDynamic = atr;
+  const minAtr = entry * 0.005; // Minimum 0.5% distance
+  const maxAtr = entry * 0.05;  // Maximum 5% distance
+  
+  const rawSlDistance = atrDynamic * slFactor;
+  if (rawSlDistance < minAtr) {
+    atrDynamic = minAtr / slFactor;
+  } else if (rawSlDistance > maxAtr) {
+    atrDynamic = maxAtr / slFactor;
+  }
+
   if (fixedProfit > 0 && posValue > 0) {
     const priceDiff = (fixedProfit / posValue) * entry;
     tp1 = isLong ? entry + priceDiff : entry - priceDiff;
   } else {
-    tp1 = isLong ? entry + atr * factor1 : entry - atr * factor1;
+    tp1 = isLong ? entry + atrDynamic * factor1 : entry - atrDynamic * factor1;
   }
 
-  tp2 = isLong ? entry + atr * factor2 : entry - atr * factor2;
-  tp3 = isLong ? entry + atr * factor3 : entry - atr * factor3;
-  sl = isLong ? entry - atr * slFactor : entry + atr * slFactor;
+  tp2 = isLong ? entry + atrDynamic * factor2 : entry - atrDynamic * factor2;
+  tp3 = isLong ? entry + atrDynamic * factor3 : entry - atrDynamic * factor3;
+  sl = isLong ? entry - atrDynamic * slFactor : entry + atrDynamic * slFactor;
   
   const rr = Math.abs(sl - entry) > 0
     ? parseFloat((Math.abs(tp2 - entry) / Math.abs(sl - entry)).toFixed(2))
