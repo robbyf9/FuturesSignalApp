@@ -161,6 +161,13 @@ async function updateWatchlist() {
       .filter((item) => {
         const symbol = item.symbol;
         if (!symbol.endsWith('USDT') || symbol.includes('_')) return false;
+
+        // EXCLUDE LEVERAGED TOKENS (BULL, BEAR, UP, DOWN)
+        const isLeveraged = /BULL|BEAR|UP|DOWN/.test(symbol);
+        if (isLeveraged && symbol !== 'SUPERUSDT' && symbol !== 'JUPUSDT' && symbol !== 'ICPUSDT' && symbol !== 'LUPUSDT') {
+           return false;
+        }
+
         // Gunakan threshold volume dari .env (default list minimal 30jt USDT)
         const minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT) || 30000000;
         return parseFloat(item.quoteVolume) >= minVol;
@@ -297,6 +304,30 @@ async function getBinancePositions() {
   } catch (err) {
     console.error('[binance] Gagal ambil posisi:', err.response?.data?.msg || err.message);
     return null;
+  }
+}
+
+/**
+ * Menganalisis Kondisi BTC (Market Sentiment Filter)
+ * Hanya Long jika BTC di atas EMA 20 (5 menit)
+ */
+async function getBTCStatus() {
+  try {
+    const res = await safeGet('/fapi/v1/klines', { symbol: 'BTCUSDT', interval: '5m', limit: 50 });
+    const klines = res.data;
+    const closes = klines.map(k => parseFloat(k[4]));
+    const currentPrice = closes[closes.length - 1];
+    const ema20 = calcEMA(closes, 20);
+    
+    return {
+       price: currentPrice,
+       ema20: ema20,
+       isBullish: currentPrice > ema20,
+       isPanic: closes[closes.length - 1] < closes[closes.length - 2] * 0.995 // Flash Crash 0.5% in 5m
+    };
+  } catch (err) {
+    console.error('[market-watch] Gagal ambil status BTC:', err.message);
+    return { isBullish: true, isPanic: false }; // Default safe if API fails
   }
 }
 
@@ -733,11 +764,20 @@ function calcVWAP(klines) {
   return volume === 0 ? 0 : volumePrice / volume;
 }
 
-function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0, htfTrend = 'NEUTRAL') {
+function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0, htfTrend = 'NEUTRAL', rvol = 1.0) {
   let score = 0;
   const reasons = [];
   const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap, atr } = indicators;
   const isScalp = interval === '1m' || interval === '5m';
+
+  // 0. RELATIVE VOLUME (RVOL) FILTER
+  if (rvol < 1.1) {
+    score -= 3;
+    reasons.push(`Low volume (RVOL: ${rvol.toFixed(2)})`);
+  } else if (rvol > 2.0) {
+    score += 2;
+    reasons.push(`High volume spike (RVOL: ${rvol.toFixed(2)})`);
+  }
 
   // 1. RSI Logic (Scalping uses RSI 7)
   const rsiVal = indicators.rsi7 || rsi;
@@ -1034,6 +1074,11 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       vwap: calcVWAP(klines.slice(-24)),
     };
 
+    // CALCULATE RELATIVE VOLUME (RVOL)
+    const volumes = klines.map(k => parseFloat(k[5]));
+    const avgVol = volumes.slice(-21, -1).reduce((s, v) => s + v, 0) / 20;
+    const rvol = volumes[volumes.length - 1] / avgVol;
+
     // HTF TREND ANALYSIS (4h)
     const closes4h = klines4h.map(k => parseFloat(k[4]));
     const ema200_4h = calcEMA(closes4h, 200);
@@ -1051,8 +1096,9 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       markPrice: parseFloat(funding.markPrice),
       stochK: indicators.stochRSI.k,
       htfTrend,
+      rvol,
       indicators,
-      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt, htfTrend),
+      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt, htfTrend, rvol),
     };
 
     if (full) {
@@ -1281,6 +1327,7 @@ TP 3: ${signalData.signal.levels.tp3}
 
 🛑 *STOP LOSS:* ${signalData.signal.levels.sl}
 ⚖️ RR Ratio: ${signalData.signal.levels.rr}
+📊 Volume Conviction: ${signalData.rvol >= 1.2 ? 'HIGH ✅' : 'LOW ⚠️'} (RVOL: ${signalData.rvol.toFixed(2)})
 
 🌍 *HTF TREND (4h):* ${signalData.signal.htfTrend}${signalData.signal.htfConflict ? ' ⚠️ (CONFLICT)' : ' ✅'}
 
@@ -1290,8 +1337,17 @@ _⚠️ Catatan: Sinyal ini hanya alert manual. Auto-trade memerlukan Confidence
   if (sent) console.log(`[telegram] Sinyal ${signalData.symbol} berhasil dikirim ke Telegram.`);
 }
 
+let isScanning = false;
+
 async function runBackgroundScanner() {
-  const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  if (isScanning) {
+    console.warn(`[cron-scan] Pemindaian sedang berlangsung, skip pemanggilan baru.`);
+    return;
+  }
+
+  isScanning = true;
+  try {
+    const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   if (!TELEGRAM_TOKEN) return;
   
   const minScore = parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7;
@@ -1302,6 +1358,16 @@ async function runBackgroundScanner() {
 
   console.log(`\n[cron-scan] Memulai pemindaian (${interval}) untuk ${WATCHLIST.length} koin...`);
   
+  // 🔥 MASTER FILTER: Ambil sentimen pasar BTC (5m)
+  const btcStatus = await getBTCStatus();
+  console.log(`[market-watch] Sentimen BTC: ${btcStatus.isBullish ? 'BULLISH ✅' : 'BEARISH ⚠️'} | Price: $${btcStatus.price.toFixed(1)}`);
+  
+  if (btcStatus.isPanic) {
+     console.error(`[market-watch] BTC PANIC DETECTED (Flash Crash). Scan dibatalkan demi keamanan.`);
+     await sendTelegramMessage(`⚠️ *BTC MARKET PANIC* ⚠️\nTerdeteksi penurunan tajam pada BTC. Bot mematalkan pemindaian koin ALT untuk mencegah loss.`);
+     return;
+  }
+
   try {
     await ensureExchangeAvailable();
   } catch (error) {
@@ -1323,9 +1389,10 @@ async function runBackgroundScanner() {
   }
 
   const activeTrades = loadActiveTrades();
+  const uniqueWatchlist = [...new Set(WATCHLIST)];
 
-  for (let i = 0; i < WATCHLIST.length; i += batchSize) {
-    const batch = WATCHLIST.slice(i, i + batchSize);
+  for (let i = 0; i < uniqueWatchlist.length; i += batchSize) {
+    const batch = uniqueWatchlist.slice(i, i + batchSize);
     const settled = await Promise.allSettled(
       batch.map((symbol) => analyzePair(symbol, interval, false))
     );
@@ -1370,6 +1437,7 @@ async function runBackgroundScanner() {
                     timestamp: Date.now()
                   };
                   console.log(`[tracker] Start tracking: ${item.symbol}`);
+                  saveActiveTrades(activeTrades); // ATOMIC SAVING: Simpan detik ini juga!
                 }
               } else {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: Konfidensi (${item.signal.confidence}%) < target (${autoTradeMinConf}%)`);
@@ -1384,13 +1452,18 @@ async function runBackgroundScanner() {
       }
     }
     
-    if (i + batchSize < WATCHLIST.length) {
+    if (i + batchSize < uniqueWatchlist.length) {
       await sleep(200);
     }
   }
   
   saveActiveTrades(activeTrades);
   console.log(`[cron-scan] Pemindaian selesai.`);
+  } catch (err) {
+    console.error(`[cron-scan] Gagal pemindaian:`, err.message);
+  } finally {
+    isScanning = false;
+  }
 }
 
 // -------------------------------------------------------------
