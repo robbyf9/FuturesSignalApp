@@ -1281,8 +1281,8 @@ async function runBackgroundScanner() {
                     tp2: parseFloat(item.signal.levels.tp2),
                     tp3: parseFloat(item.signal.levels.tp3),
                     sl: parseFloat(item.signal.levels.sl),
-                    margin: usdtAmount,
-                    leverage: leverage,
+                    margin: parseFloat(process.env.TRADE_QUANTITY_USDT) || 20,
+                    leverage: parseInt(process.env.DEFAULT_LEVERAGE) || 10,
                     hitTp1: false,
                     hitTp2: false,
                     timestamp: Date.now()
