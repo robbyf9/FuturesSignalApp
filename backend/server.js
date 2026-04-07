@@ -296,7 +296,7 @@ async function getBinancePositions() {
     return positions.filter(p => parseFloat(p.positionAmt) !== 0);
   } catch (err) {
     console.error('[binance] Gagal ambil posisi:', err.response?.data?.msg || err.message);
-    return [];
+    return null;
   }
 }
 
@@ -452,12 +452,14 @@ async function executeBinanceTrade(signalData) {
             type: 'TAKE_PROFIT_MARKET',
             stopPrice: tpPrice,
             closePosition: 'true',
-            workingType: 'CONTRACT_PRICE'
+            workingType: 'MARK_PRICE'
           });
           await tradingApi.post('/fapi/v1/order', tpParams);
           console.log(`[trade] TP Terpasang: TP2 @ ${tpPrice}`);
         } catch (tpErr) {
-          console.error(`[trade] Gagal pasang TP ${symbol}:`, tpErr.response?.data?.msg || tpErr.message);
+          const errMsg = tpErr.response?.data?.msg || tpErr.message;
+          console.error(`[trade] Gagal pasang TP ${symbol}:`, errMsg);
+          await sendTelegramMessage(`⚠️ *Gagal Pasang TP ${symbol}*\n\nError: ${errMsg}\nHarga entry mungkin terlalu dekat dengan Mark Price (Testnet limit).`);
         }
 
         try {
@@ -468,12 +470,14 @@ async function executeBinanceTrade(signalData) {
             type: 'STOP_MARKET',
             stopPrice: slPrice,
             closePosition: 'true',
-            workingType: 'CONTRACT_PRICE'
+            workingType: 'MARK_PRICE'
           });
           await tradingApi.post('/fapi/v1/order', slParams);
           console.log(`[trade] SL Terpasang: SL @ ${slPrice}`);
         } catch (slErr) {
-          console.error(`[trade] Gagal pasang SL ${symbol}:`, slErr.response?.data?.msg || slErr.message);
+          const errMsg = slErr.response?.data?.msg || slErr.message;
+          console.error(`[trade] Gagal pasang SL ${symbol}:`, errMsg);
+          await sendTelegramMessage(`⚠️ *Gagal Pasang SL ${symbol}*\n\nError: ${errMsg}\nMohon pasang SL secara manual jika bisa.`);
         }
 
         await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi Berhasil!_`);
@@ -1236,6 +1240,10 @@ async function runBackgroundScanner() {
   let rawPositions = [];
   if (process.env.TRADING_ENABLED === 'true') {
      rawPositions = await getBinancePositions();
+     if (rawPositions === null) {
+       console.error(`[cron-scan] Gagal terhubung ke Binance Positions API. Scan ditangguhkan untuk mencegah double-entry.`);
+       return; // Abort scan jika API posisi gagal, untuk mencegah double entry!
+     }
      currentOpenPositions = rawPositions.length;
      console.log(`[trade] Posisi terbuka saat ini: ${currentOpenPositions}/${maxOpen}`);
   }
@@ -1597,6 +1605,8 @@ async function monitorActiveTrades() {
   // Sync dengan posisi riel di Binance untuk mendeteksi penutupan manual
   try {
     const rawPositions = await getBinancePositions();
+    if (rawPositions === null) return; // Prevent deleting activeTrades if API fails
+
     const openOrders = await getBinanceOpenOrders(); // Fix: Tambahkan fetch open orders
     const liveSymbols = rawPositions.map(p => p.symbol);
     let historyChanged = false;
