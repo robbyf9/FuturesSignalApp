@@ -467,13 +467,31 @@ async function executeBinanceTrade(signalData) {
     });
     
     const mainOrder = await tradingApi.post('/fapi/v1/order', orderParams);
-      console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId}`);
+    const executedQty = parseFloat(mainOrder.data.origQty);
+    console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId} | Qty: ${executedQty}`);
 
-      // 4. TP & SL (MENGGUNAKAN STANDAR ORDER)
-      // Jika Signal memiliki levels, pasang TP/SL
-      if (signal.levels) {
-        const tpPrice = parseFloat(signal.levels.tp2).toFixed(precision.price);
-        const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
+    // 4. TP & SL (MENGGUNAKAN STANDAR ORDER)
+    // Jika Signal memiliki levels, pasang TP/SL
+    if (signal.levels) {
+      const tpPrice = parseFloat(signal.levels.tp2).toFixed(precision.price);
+      const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
+      
+      // Simpan rincian trade untuk tracking partial TP
+      tradeData = {
+        symbol,
+        type: signal.signal.includes('LONG') ? 'LONG' : 'SHORT',
+        entry: parseFloat(signal.levels.entry),
+        initialQty: executedQty,
+        precision: precision,
+        tp1: parseFloat(signal.levels.tp1),
+        tp2: parseFloat(signal.levels.tp2),
+        tp3: parseFloat(signal.levels.tp3),
+        sl: parseFloat(signal.levels.sl),
+        isPartiallyClosed: false,
+        hitTp1: false,
+        hitTp2: false,
+        timestamp: Date.now()
+      };
 
         try {
           // TP Order (Take Profit Market)
@@ -512,8 +530,18 @@ async function executeBinanceTrade(signalData) {
         }
 
         await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi Berhasil!_`);
+        
+        // Simpan ke database lokal setelah TP/SL terpasang
+        const activeTrades = loadActiveTrades();
+        activeTrades[symbol] = tradeData;
+        saveActiveTrades(activeTrades);
       } else {
         await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED (No TP/SL)* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\n\n_Eksekusi Berhasil! Bot akan memantau via Self-Healing._`);
+        
+        // Simpan dasar saja jika TP/SL gagal (agar tetap terlacak)
+        const activeTrades = loadActiveTrades();
+        activeTrades[symbol] = tradeData;
+        saveActiveTrades(activeTrades);
       }
 
       return true; // Berhasil Entry = Berhasil Trade (Lacak agar tidak lebih dari 5)
@@ -1434,6 +1462,9 @@ async function runBackgroundScanner() {
                     leverage: parseInt(process.env.DEFAULT_LEVERAGE) || 10,
                     hitTp1: false,
                     hitTp2: false,
+                    isPartiallyClosed: false,
+                    initialQty: parseFloat(entry) > 0 ? (parseFloat(process.env.TRADE_QUANTITY_USDT || 20) * (parseInt(process.env.DEFAULT_LEVERAGE || 10))) / parseFloat(entry) : 0,
+                    precision: { price: 2, quantity: 3 }, // Default fallback, will be refined in executeBinanceTrade
                     timestamp: Date.now()
                   };
                   console.log(`[tracker] Start tracking: ${item.symbol}`);
@@ -1526,10 +1557,13 @@ function initBinanceWebSocket() {
 /**
  * Logika pengecekan TP/SL untuk satu koin (Sekali Terdeteksi Langsung Beraksi)
  */
-function checkTradeLevels(trade, currentPrice, activeTrades = null) {
+async function checkTradeLevels(sym, currentPrice, livePrices) {
+  const activeTrades = loadActiveTrades();
+  const trade = activeTrades[sym];
+  if (!trade) return { modified: false };
+
   let changed = false;
   const isLong = trade.type === 'LONG';
-  const sym = trade.symbol;
   
   // Anti-Spam: Pastikan notifikasi yang sama tidak dikirim berulang kali (Cooldown 30 detik)
   function shouldNotify(type) {
@@ -1551,10 +1585,10 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
   const hitSl = isLong ? (currentPrice <= trade.sl) : (currentPrice >= trade.sl);
   if (hitSl) {
     if (shouldNotify('SL')) {
-      sendTelegramMessage(`🚧 *STOP LOSS PRICE TARGET HIT: ${sym}* 🚧\n\nTarget harga Stop Loss ($${trade.sl}) tersentuh oleh harga pasar ($${currentPrice}).\nBot sedang memantau eksekusi penutupan otomatis.`);
+      await sendTelegramMessage(`🚧 *STOP LOSS PRICE TARGET HIT: ${sym}* 🚧\n\nTarget harga Stop Loss ($${trade.sl}) tersentuh oleh harga pasar ($${currentPrice}).\nBot sedang memantau eksekusi penutupan otomatis.`);
       
-      // Tandai sebagai pending closure agar tidak spam notif selagi nunggu di-sync lewat monitorActiveTrades
       trade.pendingClosure = true;
+      saveActiveTrades(activeTrades);
       return { modified: true };
     }
   }
@@ -1563,15 +1597,15 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
   const hitTp3 = isLong ? (currentPrice >= trade.tp3) : (currentPrice <= trade.tp3);
   if (hitTp3) {
     if (shouldNotify('TP3')) {
-      sendTelegramMessage(`💰 *TAKE PROFIT 3 PRICE TARGET HIT: ${sym}* 💰\n\nTarget harga Profit 3 ($${trade.tp3}) tersentuh oleh harga pasar ($${currentPrice}).\nHarga ini menandakan trade telah mencapai target maksimal.`);
+      await sendTelegramMessage(`💰 *TAKE PROFIT 3 PRICE TARGET HIT: ${sym}* 💰\n\nTarget harga Profit 3 ($${trade.tp3}) tersentuh oleh harga pasar ($${currentPrice}).\nHarga ini menandakan trade telah mencapai target maksimal.`);
       
-      // Tandai sebagai pending closure
       trade.pendingClosure = true;
+      saveActiveTrades(activeTrades);
       return { modified: true };
     }
   }
 
-  // 3. Cek TP2
+  // 3. Cek TP2 (Memicu SL+ Level 2: Geser ke TP1)
   if (!trade.hitTp2) {
     const hitTp2 = isLong ? (currentPrice >= trade.tp2) : (currentPrice <= trade.tp2);
     if (hitTp2) {
@@ -1579,32 +1613,56 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
         trade.hitTp2 = true;
         trade.hitTp1 = true;
         changed = true;
-        sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
+        
+        await sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
+        
+        const settings = loadSettings();
+        const step = settings.fixed_tp_usdt;
+        if (step <= 0 && process.env.TRADING_ENABLED === 'true') {
+           const tp1Price = trade.tp1;
+           const finalBePrice = parseFloat((trade.type === 'LONG' ? tp1Price / 1.001 : tp1Price / 0.999).toFixed(trade.precision?.price || 2));
+           
+           const beSuccess = await moveStopLossToBreakEven(sym, finalBePrice, trade.type);
+           if (beSuccess) {
+              trade.sl = finalBePrice;
+              trade.slMovedToTp1 = true;
+              changed = true;
+              await sendTelegramMessage(`🛡️ *SL+ UPGRADE: ${sym}* 🛡️\n\nTarget TP2 tercapai, Stop Loss sisa posisi digeser ke level TP1 (${finalBePrice})!`);
+           }
+        }
       }
     }
   }
 
-  // 4. Cek TP1 (Memicu SL Plus)
+  // 4. TP1 (Memicu Partial TP 50% & SL Break-Even)
   if (!trade.hitTp1) {
     const hitTp1 = isLong ? (currentPrice >= trade.tp1) : (currentPrice <= trade.tp1);
     if (hitTp1) {
       if (shouldNotify('TP1')) {
         trade.hitTp1 = true;
         changed = true;
-        sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
         
-        if (!trade.slMoved && process.env.TRADING_ENABLED === 'true') {
-          // SL+ Level 1: Geser ke Break-Even (Entry + 0.1%)
-          moveStopLossToBreakEven(sym, trade.entry, trade.type).then(success => {
-            if (success) {
-              const activeTrades = loadActiveTrades();
-              if (activeTrades[sym]) {
-                activeTrades[sym].slMoved = true;
-                activeTrades[sym].sl = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
-                saveActiveTrades(activeTrades);
-              }
-            }
-          });
+        if (!trade.isPartiallyClosed && process.env.TRADING_ENABLED === 'true') {
+           const qtyToClose = trade.initialQty ? (trade.initialQty / 2).toFixed(trade.precision?.quantity || 3) : null;
+           
+           console.log(`[trade] Menjalankan Partial TP 50% untuk ${sym}...`);
+           const success = await closePartialPosition(sym, qtyToClose, trade.type);
+           
+           if (success) {
+              trade.isPartiallyClosed = true;
+              const bePrice = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
+              const finalBePrice = parseFloat(bePrice.toFixed(trade.precision?.price || 2));
+              
+              const beSuccess = await moveStopLossToBreakEven(sym, finalBePrice, trade.type);
+              if (beSuccess) trade.sl = finalBePrice;
+              
+              changed = true;
+              await sendTelegramMessage(`💰 *TP1 HIT & PROFIT SECURED: ${sym}* 💰\n\n- 50% posisi ditutup di profit.\n- Stop Loss sisa posisi digeser ke Break-Even (${finalBePrice}).\n\nTrade ini sekarang *Bebas Risiko (Risk-Free)!* 🚀`);
+           } else {
+              await sendTelegramMessage(`⚠️ *TP1 HIT - Gagal Partial Close: ${sym}* ⚠️\n\nDeteksi harga TP1 tercapai namun eksekusi penutupan 50% gagal di Binance. Mohon cek manual.`);
+           }
+        } else {
+           await sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
         }
       }
     }
@@ -1619,66 +1677,29 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
       const leverage = trade.leverage || 10;
       const posValue = margin * leverage;
       
-      // Hitung PnL dalam USDT (Real-time di memori)
       const pnlUsdt = isLong 
         ? ((currentPrice - trade.entry) / trade.entry) * posValue 
         : ((trade.entry - currentPrice) / trade.entry) * posValue;
       
-      // Ambil kelipatan step yang sudah tercapai
       const currentStep = Math.floor(pnlUsdt / step);
       
       if (currentStep > (trade.last_pnl_step || 0)) {
-          // Level Baru Terdeteksi (Misal: Profit naik dari $0.4 ke $0.6, step=$0.5)
-          // SL Baru = (Step sebelumnya) -> Profit Aman $0.5
           const targetProfitUsdt = (currentStep - 1) * step;
           const priceDiff = (targetProfitUsdt / posValue) * trade.entry;
-          const newSlPrice = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
+          const newSlPriceRaw = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
+          const newSlPrice = parseFloat(newSlPriceRaw.toFixed(trade.precision?.price || 2));
           
-          // Ganti SL di Binance
-          // Ganti SL di Binance ke harga baru (tanpa margin double)
-          moveStopLossToBreakEven(sym, newSlPrice / (isLong ? 1.001 : 0.999), trade.type).then(success => {
-             if (success) {
-                 const activeTrades = loadActiveTrades();
-                 if (activeTrades[sym]) {
-                     activeTrades[sym].last_pnl_step = currentStep;
-                     activeTrades[sym].sl = newSlPrice;
-                     saveActiveTrades(activeTrades);
-                     sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit mencapai $${pnlUsdt.toFixed(2)}. Stop Loss digeser ke $${fmtP(newSlPrice)} (+=$${step.toFixed(1)})`);
-                 }
-             }
-          });
-          
-          trade.last_pnl_step = currentStep;
-          trade.sl = newSlPrice;
-          changed = true;
-      }
-  }
-  // ------------------------------------------------
-
-  // 5. Cek TP2 (Memicu SL+ Level 2: Geser ke TP1)
-  if (!trade.hitTp2) {
-      const hitTp2 = isLong ? (currentPrice >= trade.tp2) : (currentPrice <= trade.tp2);
-      if (hitTp2) {
-         trade.hitTp2 = true;
-         changed = true;
-         // Upgrade SL manual jika tidak menggunakan Dynamic Trailing
-         if (step <= 0 && process.env.TRADING_ENABLED === 'true') {
-            const tp1Price = trade.tp1;
-            moveStopLossToBreakEven(sym, tp1Price / (isLong ? 1.001 : 0.999), trade.type).then(success => {
-                if (success) {
-                    const activeTrades = loadActiveTrades();
-                    if (activeTrades[sym]) {
-                        activeTrades[sym].slMovedToTp1 = true;
-                        activeTrades[sym].sl = tp1Price;
-                        saveActiveTrades(activeTrades);
-                        sendTelegramMessage(`🛡️ *SL+ UPGRADE: ${sym}* 🛡️\n\nTarget TP2 tercapai, Stop Loss digeser ke level TP1!`);
-                    }
-                }
-            });
-         }
+          const beSuccess = await moveStopLossToBreakEven(sym, newSlPrice, trade.type);
+          if (beSuccess) {
+              trade.last_pnl_step = currentStep;
+              trade.sl = newSlPrice;
+              changed = true;
+              await sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit mencapai $${pnlUsdt.toFixed(2)}. Stop Loss digeser ke $${fmtP(newSlPrice)} (+=$${step.toFixed(1)})`);
+          }
       }
   }
 
+  if (changed) saveActiveTrades(activeTrades);
   return { modified: changed };
 }
 
@@ -1761,6 +1782,11 @@ async function monitorActiveTrades() {
     for (const sym of symbols) {
       const trade = activeTrades[sym];
       const livePos = rawPositions.find(p => p.symbol === sym);
+      
+      const currentPrice = livePrices[sym] || trade.entry;
+      
+      // Update check trade levels with AWAIT for stability
+      await checkTradeLevels(sym, currentPrice, livePrices);
       
       if (!liveSymbols.includes(sym)) {
         // Koin ini ada di catatan bot, tapi sudah tidak ada di bursa (Berarti sudah ditutup manual/TP/SL)
