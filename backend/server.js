@@ -1233,9 +1233,10 @@ async function runBackgroundScanner() {
 
   // Cek posisi terbuka asli di bursa
   let currentOpenPositions = 0;
+  let rawPositions = [];
   if (process.env.TRADING_ENABLED === 'true') {
-     const positions = await getBinancePositions();
-     currentOpenPositions = positions.length;
+     rawPositions = await getBinancePositions();
+     currentOpenPositions = rawPositions.length;
      console.log(`[trade] Posisi terbuka saat ini: ${currentOpenPositions}/${maxOpen}`);
   }
 
@@ -1256,7 +1257,10 @@ async function runBackgroundScanner() {
           const existing = activeTrades[item.symbol];
           
           // ANTI-SPAM: Hanya kirim ke Telegram jika koin belum ada di active trades dengan tipe yang sama
-          if (!existing || existing.type !== currentType) {
+          // ANTI-DUPLICATE: Jangan buka jika sudah ada posisi riil di Binance untuk koin ini
+          const hasRealPosition = rawPositions.some(p => p.symbol === item.symbol);
+          
+          if ((!existing || existing.type !== currentType) && !hasRealPosition) {
             await sendToTelegram(item);
             console.log(`[telegram] Sinyal Baru: ${item.symbol} (${currentType})`);
             
@@ -1392,7 +1396,7 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
   const hitSl = isLong ? (currentPrice <= trade.sl) : (currentPrice >= trade.sl);
   if (hitSl) {
     if (shouldNotify('SL')) {
-      sendTelegramMessage(`🛑 *STOP LOSS HIT: ${sym}* 🛑\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nSL: ${trade.sl}\nHarga Tersentuh: ${currentPrice}\nEst. PnL: ${pnlStr}`);
+      sendTelegramMessage(`🚧 *STOP LOSS PRICE TARGET HIT: ${sym}* 🚧\n\nTarget harga Stop Loss ($${trade.sl}) tersentuh oleh harga pasar ($${currentPrice}).\nBot sedang memantau eksekusi penutupan otomatis.`);
       
       // Tandai sebagai pending closure agar tidak spam notif selagi nunggu di-sync lewat monitorActiveTrades
       trade.pendingClosure = true;
@@ -1404,7 +1408,7 @@ function checkTradeLevels(trade, currentPrice, activeTrades = null) {
   const hitTp3 = isLong ? (currentPrice >= trade.tp3) : (currentPrice <= trade.tp3);
   if (hitTp3) {
     if (shouldNotify('TP3')) {
-      sendTelegramMessage(`🚀 *FULL TAKE PROFIT (TP3) HIT: ${sym}* 🚀\n\nTipe: ${trade.type}\nEntry: ${trade.entry}\nTP3: ${trade.tp3}\nEst. PnL: ${pnlStr}\n\n🎉 Trade Selesai! 💰`);
+      sendTelegramMessage(`💰 *TAKE PROFIT 3 PRICE TARGET HIT: ${sym}* 💰\n\nTarget harga Profit 3 ($${trade.tp3}) tersentuh oleh harga pasar ($${currentPrice}).\nHarga ini menandakan trade telah mencapai target maksimal.`);
       
       // Tandai sebagai pending closure
       trade.pendingClosure = true;
