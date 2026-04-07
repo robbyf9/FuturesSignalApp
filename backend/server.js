@@ -733,7 +733,7 @@ function calcVWAP(klines) {
   return volume === 0 ? 0 : volumePrice / volume;
 }
 
-function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0) {
+function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0, htfTrend = 'NEUTRAL') {
   let score = 0;
   const reasons = [];
   const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap, atr } = indicators;
@@ -877,6 +877,18 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     score -= 1;
   }
 
+  // --- 🔥 HTF TREND ALIGNMENT PENALTY ---
+  let htfConflict = false;
+  if (htfTrend === 'BEARISH' && score > 0) {
+    score -= 10;
+    htfConflict = true;
+    reasons.push('HTF Trend Conflict (4h Bearish)');
+  } else if (htfTrend === 'BULLISH' && score < 0) {
+    score += 10;
+    htfConflict = true;
+    reasons.push('HTF Trend Conflict (4h Bullish)');
+  }
+
   let signal = 'NETRAL';
   let strength = 'neutral';
   let confidence = 50;
@@ -910,6 +922,11 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
   // Cap confidence if sideways trend is detected to prevent auto-trading
   if (sidewaysPenalty) {
     confidence = Math.min(confidence, 75);
+  }
+
+  // Hard Cap confidence if HTF conflict exists to prevent auto-trade
+  if (htfConflict) {
+    confidence = Math.min(confidence, 60);
   }
 
   const isLong = score >= 0;
@@ -966,6 +983,8 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     score,
     confidence: parseFloat(confidence.toFixed(1)),
     reasons: reasons.slice(0, 6),
+    htfTrend,
+    htfConflict,
     levels: {
       entry: formatPrice(entry),
       tp1: formatPrice(tp1),
@@ -979,13 +998,15 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
 
 async function analyzePair(symbol, interval = '1h', full = false) {
   try {
-    const [klinesRes, tickerRes, fundingRes] = await Promise.all([
+    const [klinesRes, klines4hRes, tickerRes, fundingRes] = await Promise.all([
       safeGet('/fapi/v1/klines', { symbol, interval, limit: full ? 200 : 100 }),
+      safeGet('/fapi/v1/klines', { symbol, interval: '4h', limit: 200 }),
       safeGet('/fapi/v1/ticker/24hr', { symbol }),
       safeGet('/fapi/v1/premiumIndex', { symbol }),
     ]);
 
     const klines = klinesRes.data;
+    const klines4h = klines4hRes.data;
     const ticker = tickerRes.data;
     const funding = fundingRes.data;
 
@@ -1013,6 +1034,11 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       vwap: calcVWAP(klines.slice(-24)),
     };
 
+    // HTF TREND ANALYSIS (4h)
+    const closes4h = klines4h.map(k => parseFloat(k[4]));
+    const ema200_4h = calcEMA(closes4h, 200);
+    const htfTrend = price > ema200_4h ? 'BULLISH' : (price < ema200_4h ? 'BEARISH' : 'NEUTRAL');
+
     const result = {
       symbol,
       price,
@@ -1024,8 +1050,9 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       fundingRate,
       markPrice: parseFloat(funding.markPrice),
       stochK: indicators.stochRSI.k,
+      htfTrend,
       indicators,
-      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt),
+      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt, htfTrend),
     };
 
     if (full) {
@@ -1254,6 +1281,8 @@ TP 3: ${signalData.signal.levels.tp3}
 
 🛑 *STOP LOSS:* ${signalData.signal.levels.sl}
 ⚖️ RR Ratio: ${signalData.signal.levels.rr}
+
+🌍 *HTF TREND (4h):* ${signalData.signal.htfTrend}${signalData.signal.htfConflict ? ' ⚠️ (CONFLICT)' : ' ✅'}
 
 _⚠️ Catatan: Sinyal ini hanya alert manual. Auto-trade memerlukan Confidence >= 80%._`;
 
