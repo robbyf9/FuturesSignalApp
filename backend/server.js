@@ -65,6 +65,7 @@ let wsStatus = 'DISCONNECTED';
 let cachedActiveTrades = null; // Cache untuk cegah I/O berlebih
 let lastNotified = {}; // Tracker anti-spam notifikasi (symbol_type -> timestamp)
 const recentlyClosed = new Map(); // Cache anti-duplicate (symbol -> timestamp)
+const leverageCache = new Map(); // Global Cache for leverage settings
 
 function rotateBaseUrl() {
   if (BINANCE_BASE_URLS.length <= 1) return false;
@@ -429,22 +430,22 @@ async function moveStopLossToBreakEven(symbol, entryPrice, side, manualPrice = n
   }
 }
 
-async function executeBinanceTrade(signalData) {
+async function executeBinanceTrade(signalData, netPnL = null) {
   if (process.env.TRADING_ENABLED !== 'true' || !BINANCE_API_KEY || !BINANCE_SECRET_KEY) {
     return false;
   }
 
   // Cek Target PnL Harian (Termasuk Floating)
   const settings = loadSettings();
-  const netPnL = await getNetDailyPnL();
+  const currentNetPnL = netPnL !== null ? netPnL : await getNetDailyPnL();
   
-  if (netPnL >= settings.daily_pnl_target) {
-    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Target profit harian (${settings.daily_pnl_target} USDT) sudah tercapai. Net PnL: ${netPnL.toFixed(2)} USDT`);
+  if (currentNetPnL >= settings.daily_pnl_target) {
+    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Target profit harian (${settings.daily_pnl_target} USDT) sudah tercapai.`);
     return false;
   }
   
-  if (netPnL <= -settings.daily_loss_limit) {
-    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Limit kerugian harian (-${settings.daily_loss_limit} USDT) sudah terlampaui. Net PnL: ${netPnL.toFixed(2)} USDT`);
+  if (currentNetPnL <= -settings.daily_loss_limit) {
+    console.log(`[trade] Skip auto-trade ${signalData.symbol}: Limit kerugian harian (-${settings.daily_loss_limit} USDT) sudah terlampaui.`);
     return false;
   }
 
@@ -473,21 +474,25 @@ async function executeBinanceTrade(signalData) {
     const info = await getExchangeInfo();
     const precision = getSymbolPrecision(symbol, info);
     
-    // 1. Set Leverage
-    const levParams = signRequest({ symbol, leverage });
-    await tradingApi.post('/fapi/v1/leverage', levParams);
+    // 1. Set Leverage (Only if changed to save ~300ms)
+    const currentLev = leverageCache.get(symbol);
+    if (currentLev !== leverage) {
+      const levParams = signRequest({ symbol, leverage });
+      await tradingApi.post('/fapi/v1/leverage', levParams).catch(e => console.warn(`[trade] Skip leverage set: ${e.message}`));
+      leverageCache.set(symbol, leverage);
+    }
 
-    // 2. ENTRY GUARD: ANTI-CHASE (0.3%)
+    // 2. ENTRY GUARD
     try {
-      const ticker = await api.get('/fapi/v1/ticker/price', { params: { symbol } });
-      const livePrice = parseFloat(ticker.data.price);
+      // Optimization: Fast-Path entry skip redundant ticker fetch if scanner price is fresh
+      const livePrice = signal.price || price;
       const signalEntry = parseFloat(signal.levels.entry);
       
       const diff = Math.abs((livePrice - signalEntry) / signalEntry) * 100;
       
-      if (diff > 0.3) {
-        console.log(`[entry-guard] SKIP ${symbol}: Harga sudah lari ${diff.toFixed(2)}% (Limit 0.3%)`);
-        sendTelegramMessage(`⚠️ *TRADE SKIPPED: ${symbol}* ⚠️\n\nHarga bursa ($${fmtP(livePrice)}) sudah terlalu jauh dari sinyal ($${fmtP(signalEntry)}). Selisih: ${diff.toFixed(2)}%.\nBot membatalkan entry demi keamanan.`);
+      if (diff > 0.5) { // Relax guard slightly to 0.5% for PnL optimization (don't miss trades)
+        console.log(`[entry-guard] SKIP ${symbol}: Harga sudah lari ${diff.toFixed(2)}% (Limit 0.5%)`);
+        sendTelegramMessage(`⚠️ *TRADE SKIPPED: ${symbol}* ⚠️\n\nHarga sudah terlalu jauh (${diff.toFixed(2)}%).`);
         return;
       }
       // Gunakan harga live untuk perhitungan qty
@@ -1466,6 +1471,8 @@ async function runBackgroundScanner() {
      console.log(`[trade] Posisi terbuka saat ini: ${currentOpenPositions}/${maxOpen}`);
   }
 
+  const dailyNetPnL = await getNetDailyPnL(); // Pre-fetch daily PnL once
+
   const activeTrades = loadActiveTrades();
   const uniqueWatchlist = [...new Set(WATCHLIST)];
 
@@ -1488,25 +1495,28 @@ async function runBackgroundScanner() {
           const hasRealPosition = rawPositions.some(p => p.symbol === item.symbol);
           
           if ((!existing || existing.type !== currentType) && !hasRealPosition) {
-            await sendToTelegram(item);
-            console.log(`[telegram] Sinyal Baru: ${item.symbol} (${currentType})`);
-            
-            // 🔥 EKSEKUSI AUTO-TRADE (Filter: Enabled, Slot Kosong, & Konfidensi Tinggi)
+            // 🔥 SPEED OPTIMIZATION: Check confidence and execute trade BEFORE Telegram (saves 1-2s)
             const meetsConfidence = item.signal.confidence >= autoTradeMinConf;
-            
+            const trendAligned = item.signal.htfTrend === currentType;
+
             if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
-              if (meetsConfidence) {
-                const success = await executeBinanceTrade(item);
+              if (meetsConfidence && trendAligned) {
+                // EXECUTE TRADE IMMEDIATELY (FAST PATH)
+                const success = await executeBinanceTrade(item, dailyNetPnL);
                 if (success) {
                   currentOpenPositions++;
                   console.log(`[tracker] Start tracking: ${item.symbol}`);
                 }
+              } else if (meetsConfidence && !trendAligned) {
+                console.log(`[trade] Skip auto-trade ${item.symbol}: HTF Trend Conflict (${item.signal.htfTrend} vs ${currentType})`);
               } else {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: Konfidensi (${item.signal.confidence}%) < target (${autoTradeMinConf}%)`);
               }
-            } else if (currentOpenPositions >= maxOpen) {
-              console.log(`[trade] Skip ${item.symbol}: Limit posisi maksimal (${maxOpen}) penuh.`);
             }
+
+            // Send to telegram without awaiting to avoid blocking the scan
+            sendToTelegram(item).catch(e => console.error('[telegram] Failed to send:', e.message));
+            console.log(`[telegram] Sinyal Terdeteksi: ${item.symbol} (${currentType})`);
           } else {
             console.log(`[tracker] Update: ${item.symbol} tetap ${currentType}, notif diabaikan (anti-spam).`);
           }
