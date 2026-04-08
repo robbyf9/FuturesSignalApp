@@ -902,6 +902,275 @@ function calcVWAP(klines) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 🎯 MULTI-TIMEFRAME CONFIRMATION (Reduces False Signals)
+// ─────────────────────────────────────────────────────────────────────
+async function confirmMultiTimeframe(symbol, targetTrend) {
+  try {
+    // Fetch 5m, 15m, 1h signals in parallel
+    const [signal5m, signal15m, signal1h] = await Promise.all([
+      analyzePair(symbol, '5m').catch(e => null),
+      analyzePair(symbol, '15m').catch(e => null),
+      analyzePair(symbol, '1h').catch(e => null)
+    ]);
+
+    const signals = [signal5m, signal15m, signal1h].filter(s => s && !s.skip && s.signal);
+    if (signals.length < 2) return { confirmationScore: 0, consensus: 'WEAK' }; // Need at least 2 TFs
+
+    // Count agreements with target trend (LONG/SHORT)
+    const isLong = targetTrend === 'LONG';
+    const agreements = signals.filter(s => {
+      const isBullish = s.signal.signal.includes('LONG');
+      return isLong === isBullish;
+    }).length;
+
+    const consensus = agreements >= 2 ? 'STRONG' : 'WEAK';
+    const confirmationScore = agreements; // 0-3 scale
+
+    return { confirmationScore, consensus, agreements, total: signals.length };
+  } catch (e) {
+    console.warn(`[mtf] Multi-TF confirmation failed for ${symbol}: ${e.message}`);
+    return { confirmationScore: 0, consensus: 'UNKNOWN' };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🎯 CORRELATION FILTER (Prevent Correlated Pair Clustering)
+// ─────────────────────────────────────────────────────────────────────
+function getCorrelatedPairs(symbol) {
+  // Define correlation baskets: pairs that move together
+  const correlationMap = {
+    'BTCUSDT': ['ETHUSDT', 'BNBUSDT', 'LTCUSDT'],      // Bitcoin basket
+    'ETHUSDT': ['BTCUSDT', 'BNBUSDT', 'SOLUSDT', 'MATICUSDT'], // Ethereum basket
+    'BNBUSDT': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],      // Binance Coin basket
+    'SOLUSDT': ['ETHUSDT', 'BNBUSDT'],                  // Solana basket
+    'MATICUSDT': ['ETHUSDT'],                            // Polygon (ETH L2)
+    'LTCUSDT': ['BTCUSDT'],                              // Litecoin (legacy BTC)
+    'XRPUSDT': [],                                       // XRP independent
+    'ADAUSDT': [],                                       // ADA independent
+    'DOTUSDT': [],                                       // DOT independent
+    'TRXUSDT': []                                        // TRX independent
+  };
+  return correlationMap[symbol] || [];
+}
+
+function checkCorrelationConflict(symbol, activeTrades) {
+  const correlatedPairs = getCorrelatedPairs(symbol);
+  for (const pair of correlatedPairs) {
+    if (activeTrades[pair]) {
+      const trade = activeTrades[pair];
+      // Only skip if trade type is same (don't hedge same direction)
+      if (trade.type === 'LONG' || trade.type === 'SHORT') {
+        return { conflict: true, conflictPair: pair, conflictType: trade.type };
+      }
+    }
+  }
+  return { conflict: false };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🎯 MARKET REGIME DETECTION (Trend Strength Confirmation)
+// ─────────────────────────────────────────────────────────────────────
+function detectMarketRegime(klines, ema20, ema50, ema200, price, bb) {
+  if (klines.length < 50) {
+    return { regime: 'UNKNOWN', strength: 0 };
+  }
+
+  const closes = klines.map(k => parseFloat(k[4]));
+  const highs = klines.map(k => parseFloat(k[2]));
+  const lows = klines.map(k => parseFloat(k[3]));
+
+  // Count candles in uptrend (higher close than open)
+  let uptrendCandles = 0;
+  for (let i = Math.max(0, closes.length - 20); i < closes.length; i++) {
+    const open = parseFloat(klines[i][1]);
+    if (closes[i] > open) uptrendCandles++;
+  }
+
+  const uptrendPercent = uptrendCandles / 20;
+
+  // Regime classification
+  let regime = 'CHOP';
+  let strength = 0;
+
+  if (price > ema20 && ema20 > ema50 && ema50 > ema200 && uptrendPercent > 0.6) {
+    // Strong uptrend: All EMAs stacked bullish + >60% up candles
+    regime = 'STRONG_UP';
+    strength = Math.min(10, Math.round(uptrendPercent * 10));
+  } else if (price > ema50 && ema20 > ema50 && uptrendPercent > 0.55) {
+    // Mild uptrend
+    regime = 'MILD_UP';
+    strength = 6;
+  } else if (price < ema20 && ema20 < ema50 && ema50 < ema200 && uptrendPercent < 0.4) {
+    // Strong downtrend: All EMAs stacked bearish + <40% up candles
+    regime = 'STRONG_DOWN';
+    strength = Math.min(10, Math.round((1 - uptrendPercent) * 10));
+  } else if (price < ema50 && ema20 < ema50 && uptrendPercent < 0.45) {
+    // Mild downtrend
+    regime = 'MILD_DOWN';
+    strength = 6;
+  } else {
+    // Choppy consolidation
+    regime = 'CHOP';
+    strength = 0;
+  }
+
+  return { regime, strength, uptrendPercent };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🎯 PHASE 3: ADVANCED PATTERN RECOGNITION
+// ─────────────────────────────────────────────────────────────────────
+function detectConsolidationPattern(klines) {
+  if (klines.length < 20) return { pattern: 'NONE', strength: 0 };
+
+  const closes = klines.slice(-20).map(k => parseFloat(k[4]));
+  const highs = klines.slice(-20).map(k => parseFloat(k[2]));
+  const lows = klines.slice(-20).map(k => parseFloat(k[3]));
+
+  const maxHigh = Math.max(...highs);
+  const minLow = Math.min(...lows);
+  const range = maxHigh - minLow;
+
+  // Consolidation: narrow range (< 2% of current price)
+  const currentPrice = closes[closes.length - 1];
+  const rangePercent = (range / currentPrice) * 100;
+
+  if (rangePercent < 2.5) {
+    // Count candles in range - if >80% are in upper half, breakout UP likely
+    const upperHalf = closes.filter(c => c > (minLow + range / 2)).length;
+    const breakoutDirection = upperHalf > 16 ? 'UP' : 'DOWN';
+    return { 
+      pattern: 'CONSOLIDATION', 
+      strength: 7,  // +7 bonus for tight range breakouts
+      direction: breakoutDirection,
+      rangePercent 
+    };
+  }
+
+  // Ascending Triangle: highs stable, lows rising
+  const last5Highs = highs.slice(-5);
+  const last10Lows = lows.slice(-10);
+  const highsStable = Math.max(...last5Highs) - Math.min(...last5Highs) < range * 0.1;
+  const lowsRising = last10Lows[9] > last10Lows[0];
+
+  if (highsStable && lowsRising) {
+    return { pattern: 'ASCENDING_TRIANGLE', strength: 6, direction: 'UP' };
+  }
+
+  // Descending Triangle: lows stable, highs falling
+  const last5Lows = lows.slice(-5);
+  const last10Highs = highs.slice(-10);
+  const lowsStable = Math.max(...last5Lows) - Math.min(...last5Lows) < range * 0.1;
+  const highsFalling = last10Highs[9] < last10Highs[0];
+
+  if (lowsStable && highsFalling) {
+    return { pattern: 'DESCENDING_TRIANGLE', strength: 6, direction: 'DOWN' };
+  }
+
+  return { pattern: 'NONE', strength: 0 };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🎯 PHASE 3: VOLUME BREAKOUT VALIDATION
+// ─────────────────────────────────────────────────────────────────────
+function validateVolumeBreakout(klines, srLevels) {
+  if (klines.length < 20) return { volumeValid: false, ratio: 0 };
+
+  const volumes = klines.map(k => parseFloat(k[5]));
+  const currentVolume = volumes[volumes.length - 1];
+  const avgVolume = volumes.slice(-20, -1).reduce((s, v) => s + v, 0) / 19;
+
+  // Volume ratio: current vs average
+  const volumeRatio = currentVolume / avgVolume;
+
+  // High volume required for breakouts (>1.5x average)
+  let volumeValid = volumeRatio > 1.5;
+
+  // STRONGER: If actually breaking out of resistance, accept lower volume ratio
+  if (srLevels.breakoutResistance || srLevels.breakoutSupport) {
+    volumeValid = volumeRatio > 1.3;  // Relaxed to 1.3x if confirmed breakout
+  }
+
+  return { 
+    volumeValid, 
+    ratio: parseFloat(volumeRatio.toFixed(2)), 
+    currentVolume,
+    avgVolume 
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🎯 PHASE 3: MOMENTUM CONFIRMATION (RSI + MACD Alignment)
+// ─────────────────────────────────────────────────────────────────────
+function confirmMomentumAlignment(rsi, macd, stochRSI) {
+  let score = 0;
+  const signals = [];
+
+  // RSI confirmation
+  const rsiOversold = rsi < 30;
+  const rsiOverbought = rsi > 70;
+  const rsiNeutral = rsi >= 40 && rsi <= 60;
+
+  // MACD confirmation
+  const macdBullish = macd.macd > macd.signal;
+  const macdBearish = macd.macd < macd.signal;
+
+  // Stoch RSI confirmation
+  const stochBullish = stochRSI.k < 20;  // About to cross up
+  const stochBearish = stochRSI.k > 80;  // About to cross down
+
+  // Bullish alignment
+  if ((rsiOversold && macdBullish) || (rsiNeutral && macdBullish && stochBullish)) {
+    score += 3;
+    signals.push('Bullish momentum');
+  }
+
+  // Bearish alignment
+  if ((rsiOverbought && macdBearish) || (rsiNeutral && macdBearish && stochBearish)) {
+    score -= 3;
+    signals.push('Bearish momentum');
+  }
+
+  // Weak signals
+  if (!rsiOversold && !rsiOverbought && macdBullish && stochBullish) {
+    score += 1.5;
+    signals.push('Mild bullish');
+  }
+
+  return { 
+    alignment: score !== 0 ? (score > 0 ? 'BULLISH' : 'BEARISH') : 'NEUTRAL',
+    score,
+    signals,
+    strength: Math.abs(score)
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🎯 PHASE 3: DYNAMIC POSITION SIZING (Risk Management)
+// ─────────────────────────────────────────────────────────────────────
+function calculateDynamicPositionSize(atr, balance, riskPercentage = 1.0, currentPrice) {
+  if (!atr || atr <= 0 || !balance || balance <= 0) {
+    return { size: 0, riskAmount: 0, positionRatio: 0 };
+  }
+
+  // Risk amount based on account balance
+  const riskAmount = balance * (riskPercentage / 100);
+
+  // Position size = risk / (SL distance)
+  // SL distance ~= 2 * ATR for moderate-leverage trading
+  const slDistance = 2 * atr;
+  const size = riskAmount / slDistance;
+  const positionRatio = (size * currentPrice) / balance;  // Target % of balance
+
+  return {
+    size: parseFloat(size.toFixed(4)),
+    riskAmount: parseFloat(riskAmount.toFixed(2)),
+    positionRatio: parseFloat(positionRatio.toFixed(2)),
+    slDistance: parseFloat(slDistance.toFixed(6))
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 🎯 DIVERGENCE DETECTION (Highest Probability Setups)
 // ─────────────────────────────────────────────────────────────────────
 function detectDivergence(closes, rsis, macds, prices) {
@@ -1001,11 +1270,55 @@ function calculateOptimalTPSL(entry, atr, trend, support, resistance) {
   }
 }
 
-function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0, htfTrend = 'NEUTRAL', rvol = 1.0, divergence = {}, srLevels = {}) {
+function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0, htfTrend = 'NEUTRAL', rvol = 1.0, divergence = {}, srLevels = {}, regime = {}, pattern = {}, momentum = {}, volumeStatus = {}) {
   let score = 0;
   const reasons = [];
   const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap, atr } = indicators;
   const isScalp = interval === '1m' || interval === '5m';
+
+  // ⭐ PHASE 3: PATTERN RECOGNITION BONUS
+  if (pattern.pattern === 'CONSOLIDATION' && pattern.strength > 0) {
+    score += pattern.strength;  // +7 bonus
+    reasons.push(`📦 Consolidation breakout (${pattern.direction})`);
+  } else if (pattern.pattern === 'ASCENDING_TRIANGLE') {
+    score += 6;
+    reasons.push(`📈 Ascending triangle setup`);
+  } else if (pattern.pattern === 'DESCENDING_TRIANGLE') {
+    score -= 6;
+    reasons.push(`📉 Descending triangle setup`);
+  }
+
+  // ⭐ PHASE 3: MOMENTUM CONFIRMATION BONUS
+  if (momentum.alignment === 'BULLISH' && momentum.strength > 0) {
+    score += Math.round(momentum.strength);
+    reasons.push(`⚡ Bullish momentum aligned`);
+  } else if (momentum.alignment === 'BEARISH' && momentum.strength > 0) {
+    score -= Math.round(momentum.strength);
+    reasons.push(`⚡ Bearish momentum aligned`);
+  }
+
+  // ⭐ PHASE 3: VOLUME BREAKOUT CHECK
+  if (!volumeStatus.volumeValid) {
+    if (srLevels.breakoutResistance || srLevels.breakoutSupport) {
+      score -= 3;  // Penalize breakouts without volume support
+      reasons.push(`⚠️ Breakout with low volume (${volumeStatus.ratio}x)`);
+    }
+  } else if (volumeStatus.ratio > 2.0) {
+    score += 1;
+    reasons.push(`📊 Strong volume spike (${volumeStatus.ratio}x)`);
+  }
+
+  // ⭐ MARKET REGIME FILTER (Phase 2: Strength confirmation)
+  if (regime.regime === 'STRONG_UP' && score >= 0) {
+    score += 2;  // Bonus for trading WITH the strong trend
+    reasons.push(`📊 Strong uptrend regime (+2)`);
+  } else if (regime.regime === 'STRONG_DOWN' && score <= 0) {
+    score -= 2;  // Bonus for trading WITH the strong downtrend
+    reasons.push(`📊 Strong downtrend regime (-2)`);
+  } else if (regime.regime === 'CHOP') {
+    score -= 1;  // Slight penalty for choppy/sideways market
+    reasons.push(`📊 Choppy consolidation (-1)`);
+  }
 
   // 0. RELATIVE VOLUME (RVOL) FILTER
   if (rvol < 1.1) {
@@ -1355,6 +1668,18 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     // SUPPORT/RESISTANCE DETECTION
     const srLevels = detectSupportResistance(klines, 20);
 
+    // ✅ MARKET REGIME DETECTION (Phase 2)
+    const regime = detectMarketRegime(klines, indicators.ema20, indicators.ema50, indicators.ema200, price, indicators.bb);
+
+    // ✅ PHASE 3: PATTERN RECOGNITION
+    const pattern = detectConsolidationPattern(klines);
+
+    // ✅ PHASE 3: MOMENTUM CONFIRMATION
+    const momentum = confirmMomentumAlignment(indicators.rsi, indicators.macd, indicators.stochRSI);
+
+    // ✅ PHASE 3: VOLUME BREAKOUT VALIDATION
+    const volumeStatus = validateVolumeBreakout(klines, srLevels);
+
     const result = {
       symbol,
       price,
@@ -1369,7 +1694,7 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       htfTrend,
       rvol,
       indicators,
-      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt, htfTrend, rvol, divergence, srLevels),
+      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt, htfTrend, rvol, divergence, srLevels, regime, pattern, momentum, volumeStatus),
     };
 
     if (full) {
@@ -1691,11 +2016,30 @@ async function runBackgroundScanner() {
 
             if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
               if (meetsConfidence && trendAligned) {
-                // EXECUTE TRADE IMMEDIATELY (FAST PATH)
-                const success = await executeBinanceTrade(item, dailyNetPnL);
-                if (success) {
-                  currentOpenPositions++;
-                  console.log(`[tracker] Start tracking: ${item.symbol}`);
+                // ✅ PHASE 2: Multi-Timeframe Confirmation (65-70% target)
+                const mtfConfirm = await confirmMultiTimeframe(item.symbol, currentType);
+                
+                // ✅ PHASE 2: Correlation Filter Check
+                const corrCheck = checkCorrelationConflict(item.symbol, activeTrades);
+                
+                // ✅ PHASE 3: Pattern-based validation
+                const hasStrongPattern = item.signal.reasons?.some(r => r.includes('📦') || r.includes('📈') || r.includes('📉'));
+                const volumeNotlow = item.signal.reasons?.some(r => r.includes('📊')) || !item.signal.reasons?.some(r => r.includes('⚠️'));
+                
+                // Only execute if all checks pass
+                if (mtfConfirm.consensus === 'STRONG' && !corrCheck.conflict && (!item.signal.reasons?.some(r => r.includes('⚠️')))) {
+                  // EXECUTE TRADE IMMEDIATELY (FAST PATH)
+                  const success = await executeBinanceTrade(item, dailyNetPnL);
+                  if (success) {
+                    currentOpenPositions++;
+                    console.log(`[tracker] Start tracking: ${item.symbol}`);
+                  }
+                } else if (corrCheck.conflict) {
+                  console.log(`[trade] Skip auto-trade ${item.symbol}: Correlation conflict with ${corrCheck.conflictPair} (${corrCheck.conflictType})`);
+                } else if (mtfConfirm.consensus === 'WEAK') {
+                  console.log(`[trade] Skip auto-trade ${item.symbol}: Multi-TF weak consensus (${mtfConfirm.agreements}/${mtfConfirm.total})`);
+                } else if (item.signal.reasons?.some(r => r.includes('⚠️'))) {
+                  console.log(`[trade] Skip auto-trade ${item.symbol}: Low volume breakout - not recommended`);
                 }
               } else if (meetsConfidence && !trendAligned) {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: HTF Trend Conflict (${item.signal.htfTrend} vs ${currentType})`);
