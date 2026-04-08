@@ -49,12 +49,14 @@ function getMarketBaseUrl() {
   return 'https://fapi.binance.com';
 }
 
-// URL untuk Trading API (Order, Position) — bisa testnet jika diaktifkan
+// URL untuk Trading API (Order, Position) — Bisa pakai proxy jika diaktifkan
 function getActiveBaseUrl() {
   const USE_TESTNET = process.env.USE_BINANCE_TESTNET === 'true';
-  const defaultTestnet = 'https://fapi-testnet.binance.com';
+  const testnetProxy = process.env.BINANCE_TESTNET_URL; // Optional custom proxy for testnet
 
-  if (USE_TESTNET) return 'https://testnet.binancefuture.com';
+  if (USE_TESTNET) {
+    return testnetProxy || 'https://testnet.binancefuture.com';
+  }
   return getMarketBaseUrl();
 }
 
@@ -287,16 +289,22 @@ function signRequest(params) {
 }
 
 let exchangeInfoCache = null;
+let lastExchangeInfoFetch = 0;
 
 async function getExchangeInfo() {
-  if (exchangeInfoCache) return exchangeInfoCache;
+  const now = Date.now();
+  // Refresh cache tiap 12 jam untuk akurasi presisi koin baru
+  if (exchangeInfoCache && (now - lastExchangeInfoFetch < 12 * 60 * 60 * 1000)) {
+    return exchangeInfoCache;
+  }
   try {
     const res = await api.get('/fapi/v1/exchangeInfo');
     exchangeInfoCache = res.data;
+    lastExchangeInfoFetch = now;
     return exchangeInfoCache;
   } catch (err) {
     console.error('[binance] Gagal ambil Exchange Info:', err.message);
-    return null;
+    return exchangeInfoCache; // Fallback ke cache lama jika ada
   }
 }
 
@@ -517,6 +525,9 @@ async function executeBinanceTrade(signalData, netPnL = null) {
     const executedQty = parseFloat(mainOrder.data.origQty);
     console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId} | Qty: ${executedQty}`);
 
+    // 🔥 SAFETY DELAY: Tunggu 500ms agar Binance Testnet sinkron sebelum pasang TP/SL
+    await sleep(500);
+
     // 4. TP & SL (MENGGUNAKAN STANDAR ORDER)
     // Jika Signal memiliki levels, pasang TP/SL
     if (signal.levels) {
@@ -554,8 +565,9 @@ async function executeBinanceTrade(signalData, netPnL = null) {
           console.log(`[trade] TP Terpasang: TP2 @ ${tpPrice}`);
         } catch (tpErr) {
           const errMsg = tpErr.response?.data?.msg || tpErr.message;
-          console.error(`[trade] Gagal pasang TP ${symbol}:`, errMsg);
-          await sendTelegramMessage(`⚠️ *Gagal Pasang TP ${symbol}*\n\nError: ${errMsg}\nHarga entry mungkin terlalu dekat dengan Mark Price (Testnet limit).`);
+          const errCode = tpErr.response?.data?.code || 'N/A';
+          console.error(`[trade] Gagal pasang TP ${symbol} (${errCode}):`, errMsg);
+          await sendTelegramMessage(`⚠️ *Gagal Pasang TP ${symbol}* (Code: ${errCode})\n\nError: ${errMsg}\nParams: side=${oppositeSide}, price=${tpPrice}`);
         }
 
         try {
@@ -572,8 +584,9 @@ async function executeBinanceTrade(signalData, netPnL = null) {
           console.log(`[trade] SL Terpasang: SL @ ${slPrice}`);
         } catch (slErr) {
           const errMsg = slErr.response?.data?.msg || slErr.message;
-          console.error(`[trade] Gagal pasang SL ${symbol}:`, errMsg);
-          await sendTelegramMessage(`⚠️ *Gagal Pasang SL ${symbol}*\n\nError: ${errMsg}\nMohon pasang SL secara manual jika bisa.`);
+          const errCode = slErr.response?.data?.code || 'N/A';
+          console.error(`[trade] Gagal pasang SL ${symbol} (${errCode}):`, errMsg);
+          await sendTelegramMessage(`⚠️ *Gagal Pasang SL ${symbol}* (Code: ${errCode})\n\nError: ${errMsg}\nParams: side=${oppositeSide}, price=${slPrice}`);
         }
 
         await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi Berhasil!_`);
