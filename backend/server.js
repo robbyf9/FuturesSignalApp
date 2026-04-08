@@ -1656,14 +1656,20 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     const ema200_4h = calcEMA(closes4h, 200);
     const htfTrend = price > ema200_4h ? 'BULLISH' : (price < ema200_4h ? 'BEARISH' : 'NEUTRAL');
 
-    // DIVERGENCE DETECTION
-    const rsis = klines.map(k => {
-      const c = klines.map(kline => parseFloat(kline[4]));
-      return calcRSI(c);
-    });
-    const lastRSI = indicators.rsi;
-    const prices = closes;
-    const divergence = detectDivergence(prices, lastRSI, indicators.macd, prices);
+    // DIVERGENCE DETECTION - Build RSI values array for last 20 candles
+    const rsiValues = [];
+    for (let i = Math.max(0, closes.length - 20); i < closes.length; i++) {
+      rsiValues.push(calcRSI(closes.slice(0, i + 1)));
+    }
+    
+    // Build MACD values array (extract MACD line from each step)
+    const macdValues = [];
+    for (let i = Math.max(0, closes.length - 20); i < closes.length; i++) {
+      const m = calcMACD(closes.slice(0, i + 1));
+      macdValues.push(m.macd);
+    }
+    
+    const divergence = detectDivergence(closes.slice(-20), rsiValues, macdValues, closes.slice(-20));
 
     // SUPPORT/RESISTANCE DETECTION
     const srLevels = detectSupportResistance(klines, 20);
