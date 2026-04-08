@@ -68,6 +68,7 @@ let cachedActiveTrades = null; // Cache untuk cegah I/O berlebih
 let lastNotified = {}; // Tracker anti-spam notifikasi (symbol_type -> timestamp)
 const recentlyClosed = new Map(); // Cache anti-duplicate (symbol -> timestamp)
 const leverageCache = new Map(); // Global Cache for leverage settings
+let currentOpenPositions = 0; // Global tracker for open positions
 
 function rotateBaseUrl() {
   if (BINANCE_BASE_URLS.length <= 1) return false;
@@ -1479,7 +1480,6 @@ async function runBackgroundScanner() {
   }
 
   // Cek posisi terbuka asli di bursa
-  let currentOpenPositions = 0;
   let rawPositions = [];
   if (process.env.TRADING_ENABLED === 'true') {
      rawPositions = await getBinancePositions();
@@ -1923,7 +1923,7 @@ async function monitorActiveTrades() {
         const trade = activeTrades[sym];
         const currentPrice = priceMap[sym];
         if (!currentPrice) continue;
-        const res = checkTradeLevels(trade, currentPrice, activeTrades);
+        const res = await checkTradeLevels(sym, currentPrice, activeTrades);
         if (res.modified) modified = true;
       }
       if (modified) saveActiveTrades(activeTrades);
