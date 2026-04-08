@@ -1774,6 +1774,7 @@ async function adoptOrphanPositions() {
   try {
      const rawPositions = await getBinancePositions();
      const maxOpen = parseInt(process.env.MAX_OPEN_POSITIONS) || 5;
+     const activeTrades = loadActiveTrades();
      
      currentOpenPositions = rawPositions.length;
     let changed = false;
