@@ -901,7 +901,107 @@ function calcVWAP(klines) {
   return volume === 0 ? 0 : volumePrice / volume;
 }
 
-function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0, htfTrend = 'NEUTRAL', rvol = 1.0) {
+// ─────────────────────────────────────────────────────────────────────
+// 🎯 DIVERGENCE DETECTION (Highest Probability Setups)
+// ─────────────────────────────────────────────────────────────────────
+function detectDivergence(closes, rsis, macds, prices) {
+  if (closes.length < 5 || rsis.length < 5) {
+    return { bullishDiv: false, bearishDiv: false, confidence: 0 };
+  }
+
+  // Get last 5 valid candles
+  const last5Closes = closes.slice(-5);
+  const last5RSI = rsis.slice(-5);
+  const last5Prices = prices.slice(-5);
+
+  // Current swing lows/highs
+  const currentPrice = last5Prices[last5Prices.length - 1];
+  const currentRSI = last5RSI[last5RSI.length - 1];
+  
+  const prevPrice = last5Prices[last5Prices.length - 2];
+  const prevRSI = last5RSI[last5RSI.length - 2];
+
+  let bullishDiv = false, bearishDiv = false;
+  let divStrength = 0;
+
+  // Hidden Bullish Divergence
+  // Price makes lower low, RSI makes higher low → Strong reversal signal
+  if (currentPrice < prevPrice && currentRSI > prevRSI && currentRSI < 50) {
+    bullishDiv = true;
+    divStrength = (currentRSI - prevRSI) * 2; // 0-100 scale
+  }
+
+  // Regular Bearish Divergence
+  // Price makes higher high, RSI makes lower high → Strong reversal signal
+  if (currentPrice > prevPrice && currentRSI < prevRSI && currentRSI > 50) {
+    bearishDiv = true;
+    divStrength = (prevRSI - currentRSI) * 2;
+  }
+
+  return {
+    bullishDiv,
+    bearishDiv,
+    confidence: Math.min(100, divStrength),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 📍 SUPPORT & RESISTANCE DETECTION
+// ─────────────────────────────────────────────────────────────────────
+function detectSupportResistance(klines, period = 20) {
+  if (klines.length < period) {
+    return { support: 0, resistance: 0, isBreakout: false };
+  }
+
+  const highs = klines.slice(-period).map(k => Number(k[2]));
+  const lows = klines.slice(-period).map(k => Number(k[3]));
+  const currentPrice = Number(klines[klines.length - 1][4]);
+
+  const resistance = Math.max(...highs);
+  const support = Math.min(...lows);
+
+  // Check if price broke recent support or resistance
+  const isBreakoutResistance = currentPrice > resistance * 1.005; // 0.5% above
+  const isBreakoutSupport = currentPrice < support * 0.995;      // 0.5% below
+
+  return {
+    support,
+    resistance,
+    breakoutResistance: isBreakoutResistance,
+    breakoutSupport: isBreakoutSupport,
+    isNearSupport: currentPrice < support * 1.02,
+    isNearResistance: currentPrice > resistance * 0.98,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 🎲 OPTIMAL TP/SL WITH GUARANTEED R:R 1:2
+// ─────────────────────────────────────────────────────────────────────
+function calculateOptimalTPSL(entry, atr, trend, support, resistance) {
+  const isLong = trend === 'long' || trend === 'bullish';
+
+  if (isLong) {
+    // Long: SL below support, TP at 2x risk
+    const sl = Math.max(support, entry - atr * 1.5);
+    const riskDistance = entry - sl;
+    const tp1 = entry + riskDistance * 1.2; // 1.2:1
+    const tp2 = entry + riskDistance * 2.0; // 2:1 (guaranteed minimum)
+    const tp3 = entry + riskDistance * 3.0; // 3:1
+
+    return { tp1, tp2, tp3, sl, rr: 2.0 };
+  } else {
+    // Short: SL above resistance, TP at 2x risk
+    const sl = Math.min(resistance, entry + atr * 1.5);
+    const riskDistance = sl - entry;
+    const tp1 = entry - riskDistance * 1.2;
+    const tp2 = entry - riskDistance * 2.0; // 2:1 (guaranteed minimum)
+    const tp3 = entry - riskDistance * 3.0; // 3:1
+
+    return { tp1, tp2, tp3, sl, rr: 2.0 };
+  }
+}
+
+function generateSignal(indicators, price, fundingRate, interval = '1h', customFixedTp = 0, htfTrend = 'NEUTRAL', rvol = 1.0, divergence = {}, srLevels = {}) {
   let score = 0;
   const reasons = [];
   const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap, atr } = indicators;
@@ -947,6 +1047,34 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     } else {
       reasons.push('MACD bearish crossover');
     }
+  }
+
+  // ⭐ 2.5 DIVERGENCE DETECTION (Highest Probability)
+  if (divergence.bullishDiv) {
+    score += 5;
+    reasons.push(`🔺 Hidden Bullish Divergence (strength: ${divergence.confidence}%)`);
+  }
+  if (divergence.bearishDiv) {
+    score -= 5;
+    reasons.push(`🔻 Regular Bearish Divergence (strength: ${divergence.confidence}%)`);
+  }
+
+  // ⭐ 2.7 SUPPORT/RESISTANCE BREAKOUT
+  if (srLevels.breakoutResistance) {
+    score += 4;
+    reasons.push(`📈 Breakout above resistance (${srLevels.resistance.toFixed(4)})`);
+  }
+  if (srLevels.breakoutSupport) {
+    score -= 4;
+    reasons.push(`📉 Breakdown below support (${srLevels.support.toFixed(4)})`);
+  }
+  if (srLevels.isNearSupport && score > 0) {
+    score += 2;
+    reasons.push(`📍 Price near support (bounce play)`);
+  }
+  if (srLevels.isNearResistance && score < 0) {
+    score -= 2;
+    reasons.push(`📍 Price near resistance (rejection play)`);
   }
 
   // 3. TREND FILTER (EMA 200 & EMA 9/21/50)
@@ -1109,48 +1237,21 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
   const isLong = score >= 0;
   const entry = price;
   
-  // FIXED PROFIT SCALPING LOGIC
-  const fixedProfit = customFixedTp > 0 ? customFixedTp : (parseFloat(process.env.FIXED_PROFIT_USDT) || 0);
-  const margin = parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
-  const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
-  const posValue = margin * leverage;
-
-  let tp1, tp2, tp3, sl;
+  // 🎯 OPTIMAL TP/SL WITH GUARANTEED R:R 1:2+ (PRIORITY FOR 75% WR)
+  const tpslLevels = calculateOptimalTPSL(
+    entry,
+    atr,
+    isLong ? 'long' : 'short',
+    srLevels.support || entry * 0.95,
+    srLevels.resistance || entry * 1.05
+  );
   
-  // TP Ratio Optimization
-  // Scalping: TP1 (ATR 1.0), TP2 (ATR 2.0), TP3 (ATR 3.5), SL (ATR 1.5)
-  // Swing: TP1 (ATR 1.5), TP2 (ATR 3.0), TP3 (ATR 5.0), SL (ATR 2.0)
-  const factor1 = isScalp ? 1.0 : 1.5;
-  const factor2 = isScalp ? 2.0 : 3.0;
-  const factor3 = isScalp ? 3.5 : 5.0;
-  const slFactor = isScalp ? 1.5 : 2.0;
-
-  // Dynamic ATR Clamping for SL/TP
-  let atrDynamic = atr;
-  const minAtr = entry * 0.005; // Minimum 0.5% distance
-  const maxAtr = entry * 0.05;  // Maximum 5% distance
+  let tp1 = tpslLevels.tp1;
+  let tp2 = tpslLevels.tp2;  // GUARANTEED 1:2 R:R
+  let tp3 = tpslLevels.tp3;
+  let sl = tpslLevels.sl;
   
-  const rawSlDistance = atrDynamic * slFactor;
-  if (rawSlDistance < minAtr) {
-    atrDynamic = minAtr / slFactor;
-  } else if (rawSlDistance > maxAtr) {
-    atrDynamic = maxAtr / slFactor;
-  }
-
-  if (fixedProfit > 0 && posValue > 0) {
-    const priceDiff = (fixedProfit / posValue) * entry;
-    tp1 = isLong ? entry + priceDiff : entry - priceDiff;
-  } else {
-    tp1 = isLong ? entry + atrDynamic * factor1 : entry - atrDynamic * factor1;
-  }
-
-  tp2 = isLong ? entry + atrDynamic * factor2 : entry - atrDynamic * factor2;
-  tp3 = isLong ? entry + atrDynamic * factor3 : entry - atrDynamic * factor3;
-  sl = isLong ? entry - atrDynamic * slFactor : entry + atrDynamic * slFactor;
-  
-  const rr = Math.abs(sl - entry) > 0
-    ? parseFloat((Math.abs(tp2 - entry) / Math.abs(sl - entry)).toFixed(2))
-    : 0;
+  const rr = tpslLevels.rr;
 
   const formatPrice = (value) => parseFloat(value.toFixed(price > 100 ? 2 : 6));
 
@@ -1242,6 +1343,18 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     const ema200_4h = calcEMA(closes4h, 200);
     const htfTrend = price > ema200_4h ? 'BULLISH' : (price < ema200_4h ? 'BEARISH' : 'NEUTRAL');
 
+    // DIVERGENCE DETECTION
+    const rsis = klines.map(k => {
+      const c = klines.map(kline => parseFloat(kline[4]));
+      return calcRSI(c);
+    });
+    const lastRSI = indicators.rsi;
+    const prices = closes;
+    const divergence = detectDivergence(prices, lastRSI, indicators.macd, prices);
+
+    // SUPPORT/RESISTANCE DETECTION
+    const srLevels = detectSupportResistance(klines, 20);
+
     const result = {
       symbol,
       price,
@@ -1256,7 +1369,7 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       htfTrend,
       rvol,
       indicators,
-      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt, htfTrend, rvol),
+      signal: generateSignal(indicators, price, fundingRate, interval, loadSettings().fixed_tp_usdt, htfTrend, rvol, divergence, srLevels),
     };
 
     if (full) {
@@ -1511,7 +1624,7 @@ async function runBackgroundScanner() {
     const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   if (!TELEGRAM_TOKEN) return;
   
-  const minScore = parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7;
+  const minScore = parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 9;
   const autoTradeMinConf = parseInt(process.env.AUTO_TRADE_MIN_CONFIDENCE, 10) || 80;
   const interval = process.env.TRADING_TIMEFRAME || '1h';
   const maxOpen = parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 5;
@@ -2203,7 +2316,7 @@ app.get('/api/test-api', async (req, res) => {
       balance: balance ? parseFloat(balance.walletBalance).toFixed(2) : '0',
       positionsCount: account.positions.filter(p => parseFloat(p.positionAmt) !== 0).length,
       config: {
-        minScore: parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 7,
+        minScore: parseInt(process.env.TELEGRAM_MIN_SCORE, 10) || 9,
         minConf: parseInt(process.env.AUTO_TRADE_MIN_CONFIDENCE, 10) || 80,
         maxOpen: parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 5,
         tradingEnabled: process.env.TRADING_ENABLED === 'true'
