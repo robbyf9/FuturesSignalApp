@@ -243,12 +243,33 @@ const TESTNET_BASE_URL = 'https://testnet.binancefuture.com';
 
 const tradingApi = axios.create({
   baseURL: USE_TESTNET ? TESTNET_BASE_URL : getActiveBaseUrl(),
-  timeout: 10000,
+  timeout: 15000, // Slightly longer for production stability
   headers: {
     'X-MBX-APIKEY': BINANCE_API_KEY,
     'Content-Type': 'application/x-www-form-urlencoded'
   }
 });
+
+// Interceptor for Auto-Retry on Trading API (Very important for production)
+tradingApi.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const config = error.config;
+    // Retry on Network Errors or Binance 5xx errors (Proxy or Server Down)
+    const shouldRetry = Boolean(config) && 
+      (!error.response || (error.response.status >= 500 && error.response.status < 600));
+
+    if (!shouldRetry || (config.__retryCount || 0) >= 3) {
+      return Promise.reject(normalizeAxiosError(error));
+    }
+
+    config.__retryCount = (config.__retryCount || 0) + 1;
+    const delay = 1000 * config.__retryCount;
+    console.warn(`[trading-api] Error ${error.response?.status || 'Network'}. Retrying ${config.__retryCount}/3 after ${delay}ms...`);
+    await sleep(delay);
+    return tradingApi(config);
+  }
+);
 
 function signRequest(params) {
   const timestamp = Date.now();
@@ -279,15 +300,18 @@ async function getExchangeInfo() {
 }
 
 function getSymbolPrecision(symbol, info) {
-  if (!info) return { price: 2, quantity: 3 };
+  // Enhanced fallback logic for small coins like PORT3 or ENA
+  const defaultPrecision = { price: 6, quantity: 2 }; // More generous fallback for price
+  if (!info) return defaultPrecision;
+  
   const sym = info.symbols.find(s => s.symbol === symbol);
-  if (!sym) return { price: 2, quantity: 3 };
+  if (!sym) return defaultPrecision;
   
   const priceFilter = sym.filters.find(f => f.filterType === 'PRICE_FILTER');
   const lotFilter = sym.filters.find(f => f.filterType === 'LOT_SIZE');
   
-  const tickSize = priceFilter ? parseFloat(priceFilter.tickSize) : 0.01;
-  const stepSize = lotFilter ? parseFloat(lotFilter.stepSize) : 0.001;
+  const tickSize = priceFilter ? parseFloat(priceFilter.tickSize) : 0.000001;
+  const stepSize = lotFilter ? parseFloat(lotFilter.stepSize) : 0.01;
   
   return {
     price: Math.max(0, Math.round(-Math.log10(tickSize))),
@@ -391,7 +415,7 @@ async function moveStopLossToBreakEven(symbol, entryPrice, side, manualPrice = n
       type: 'STOP_MARKET',
       stopPrice: finalBePrice,
       closePosition: 'true',
-      workingType: 'CONTRACT_PRICE'
+      workingType: 'MARK_PRICE'
     });
     
     await tradingApi.post('/fapi/v1/order', slParams);
@@ -1701,6 +1725,7 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
               trade.last_pnl_step = currentStep;
               trade.sl = newSlPrice;
               changed = true;
+              console.log(`[trailing-sl] ${sym} profit=$${pnlUsdt.toFixed(2)} | target=$${targetProfitUsdt.toFixed(2)}. SL moved to ${newSlPrice}`);
               await sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit mencapai $${pnlUsdt.toFixed(2)}. Stop Loss digeser ke $${fmtP(newSlPrice)} (+=$${step.toFixed(1)})`);
           }
       }
@@ -1827,7 +1852,7 @@ async function monitorActiveTrades() {
             type: 'TAKE_PROFIT_MARKET',
             stopPrice: parseFloat(trade.tp2).toFixed(prec.price),
             closePosition: 'true',
-            workingType: 'CONTRACT_PRICE'
+            workingType: 'MARK_PRICE'
           });
           await tradingApi.post('/fapi/v1/order', tpParams).catch(e => console.error(`[self-healing] Gagal pasang TP ${sym}:`, e.message));
         }
@@ -1842,7 +1867,7 @@ async function monitorActiveTrades() {
             type: 'STOP_MARKET',
             stopPrice: parseFloat(trade.sl).toFixed(prec.price),
             closePosition: 'true',
-            workingType: 'CONTRACT_PRICE'
+            workingType: 'MARK_PRICE'
           });
           await tradingApi.post('/fapi/v1/order', slParams).catch(e => console.error(`[self-healing] Gagal pasang SL ${sym}:`, e.message));
         }
