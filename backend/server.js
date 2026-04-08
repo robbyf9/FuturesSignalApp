@@ -18,7 +18,7 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 // Alwaysdata Nginx reverse proxy mengirimkan IPv6 lewat process.env.IP 
-const HOST = process.env.IP || '::';
+const HOST = process.env.IP || '0.0.0.0';
 const DEFAULT_BINANCE_BASE_URL = 'https://fapi.binance.com';
 const REQUEST_TIMEOUT_MS = Number(process.env.BINANCE_TIMEOUT_MS) || 15000;
 
@@ -345,14 +345,20 @@ async function fetchSigned(method, endpoint, params = {}) {
     method,
     url: `${endpoint}?${queryString}`
   };
-  const res = await tradingApi(config);
-  return res.data;
+  try {
+    const res = await tradingApi(config);
+    return res.data;
+  } catch (err) {
+    // Re-throw so callers can handle specifically, but normalized
+    throw err;
+  }
 }
 
 async function getBinancePositions() {
   try {
     // Filter hanya posisi yang memiliki jumlah koin (aktif)
     const positions = await fetchSigned('GET', '/fapi/v2/positionRisk');
+    if (!positions || !Array.isArray(positions)) return [];
     return positions.filter(p => parseFloat(p.positionAmt) !== 0);
   } catch (err) {
     console.error('[binance] Gagal ambil posisi:', err.response?.data?.msg || err.message);
@@ -387,7 +393,8 @@ async function getBTCStatus() {
 async function getBinanceOpenOrders(symbol = null) {
   try {
     const params = symbol ? { symbol } : {};
-    return await fetchSigned('GET', '/fapi/v1/openOrders', params);
+    const orders = await fetchSigned('GET', '/fapi/v1/openOrders', params);
+    return Array.isArray(orders) ? orders : [];
   } catch (err) {
     console.error(`[binance] Gagal ambil open orders ${symbol || ''}:`, err.response?.data?.msg || err.message);
     return [];
