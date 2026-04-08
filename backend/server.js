@@ -2182,18 +2182,29 @@ app.get('/api/scanner', async (req, res) => {
       batch.map((symbol) => analyzePair(symbol, interval, false))
     );
 
-    for (const res of settled) {
+    for (let j = 0; j < settled.length; j++) {
+      const res = settled[j];
+      const symbol = batch[j];
+      
       if (res.status === 'fulfilled') {
         const item = res.value;
-        if (Math.abs(item.signal.score) >= minScore) {
+        // Filter out skipped pairs (low liquidity, etc.)
+        if (item.skip) {
+          console.log(`  skip ${symbol}: ${item.reason}`);
+          continue;
+        }
+        if (item.signal && Math.abs(item.signal.score) >= minScore) {
           results.push(item);
         }
-        console.log(`  ok ${item.symbol} -> ${item.signal.signal} (${item.signal.score})`);
+        if (item.signal) {
+          console.log(`  ok ${symbol} -> ${item.signal.signal} (${item.signal.score})`);
+        }
       } else {
         const err = res.reason;
         const normalized = normalizeAxiosError(err);
-        failures.push('Unknown');
-        failureDetails.push({ error: normalized?.message || 'Unknown batch error' });
+        failures.push(symbol);
+        failureDetails.push({ symbol, error: normalized?.message || 'Unknown batch error' });
+        console.error(`  fail ${symbol}: ${normalized?.message || 'Unknown error'}`);
       }
     }
     
