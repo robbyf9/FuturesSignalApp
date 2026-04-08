@@ -158,11 +158,18 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../frontend/public')));
 
-let WATCHLIST = [
-  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT'
-];
+let WATCHLIST = (process.env.CUSTOM_WATCHLIST || 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,MATICUSDT,DOTUSDT,LTCUSDT,TRXUSDT').split(',').map(s => s.trim().toUpperCase());
 
 async function updateWatchlist() {
+  if (process.env.USE_FIXED_WATCHLIST === 'true') {
+    const list = (process.env.CUSTOM_WATCHLIST || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    if (list.length > 0) {
+      WATCHLIST = list;
+      console.log(`[system] Mode FIXED aktif: Memantau ${WATCHLIST.length} koin utama.`);
+      return;
+    }
+  }
+  
   try {
     const { data } = await safeGet('/fapi/v1/ticker/24hr');
     const blacklist = (process.env.SYMBOL_BLACKLIST || '').split(',').map(s => s.trim().toUpperCase());
@@ -1765,13 +1772,13 @@ async function adoptOrphanPositions() {
   if (process.env.TRADING_ENABLED !== 'true') return;
   
   try {
-    const positions = await getBinancePositions();
-    if (positions.length === 0) return;
-    
-    const activeTrades = loadActiveTrades();
+     const rawPositions = await getBinancePositions();
+     const maxOpen = parseInt(process.env.MAX_OPEN_POSITIONS) || 5;
+     
+     currentOpenPositions = rawPositions.length;
     let changed = false;
     
-    for (const pos of positions) {
+    for (const pos of rawPositions) {
       const sym = pos.symbol;
       
       // SKIP jika koin baru saja ditutup (Cegah duplikasi history)
