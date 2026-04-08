@@ -135,6 +135,11 @@ function normalizeAxiosError(error) {
   return error;
 }
 
+function fmtP(val) {
+  if (!val) return '0.00';
+  return val > 100 ? val.toFixed(2) : (val > 1 ? val.toFixed(4) : val.toFixed(6));
+}
+
 function handleRouteError(res, error, fallbackLabel) {
   const normalized = normalizeAxiosError(error);
   const message = normalized?.message || fallbackLabel || 'Unknown server error';
@@ -348,7 +353,7 @@ async function getBinanceOpenOrders(symbol = null) {
   }
 }
 
-async function moveStopLossToBreakEven(symbol, entryPrice, side) {
+async function moveStopLossToBreakEven(symbol, entryPrice, side, manualPrice = null) {
   if (process.env.TRADING_ENABLED !== 'true') return false;
   
   try {
@@ -368,11 +373,17 @@ async function moveStopLossToBreakEven(symbol, entryPrice, side) {
       console.log(`[trade] SL Lama Dibatalkan: ${symbol} (${order.orderId})`);
     }
     
-    // 3. Pasang SL Baru di harga Entry + 0.1% (untuk cover fee & profit tipis)
-    // Long: Entry * 1.001, Short: Entry * 0.999
-    const isLong = side === 'BUY' || side === 'LONG';
-    const bePrice = isLong ? entryPrice * 1.001 : entryPrice * 0.999;
-    const finalBePrice = parseFloat(bePrice.toFixed(precision.price));
+    // 3. Pasang SL Baru
+    let finalBePrice;
+    if (manualPrice !== null) {
+      // Jika harga diberikan manual (e.g. Trailing SL), gunakan langsung
+      finalBePrice = parseFloat(parseFloat(manualPrice).toFixed(precision.price));
+    } else {
+      // Jika harga Entry (Break-Even), tambahkan 0.1% buffer fee
+      const isLong = side === 'BUY' || side === 'LONG';
+      const bePrice = isLong ? entryPrice * 1.001 : entryPrice * 0.999;
+      finalBePrice = parseFloat(bePrice.toFixed(precision.price));
+    }
     
     const slParams = signRequest({
       symbol,
@@ -484,7 +495,7 @@ async function executeBinanceTrade(signalData) {
       const slPrice = parseFloat(signal.levels.sl).toFixed(precision.price);
       
       // Simpan rincian trade untuk tracking partial TP
-      tradeData = {
+      const tradeData = {
         symbol,
         type: signal.signal.includes('LONG') ? 'LONG' : 'SHORT',
         entry: parseFloat(signal.levels.entry),
@@ -1464,26 +1475,7 @@ async function runBackgroundScanner() {
                 const success = await executeBinanceTrade(item);
                 if (success) {
                   currentOpenPositions++;
-                  // HANYA simpan ke database lokal jika trade benar-benar dieksekusi di bursa
-                  activeTrades[item.symbol] = {
-                    symbol: item.symbol,
-                    type: currentType,
-                    entry: parseFloat(entry),
-                    tp1: parseFloat(item.signal.levels.tp1),
-                    tp2: parseFloat(item.signal.levels.tp2),
-                    tp3: parseFloat(item.signal.levels.tp3),
-                    sl: parseFloat(item.signal.levels.sl),
-                    margin: parseFloat(process.env.TRADE_QUANTITY_USDT) || 20,
-                    leverage: parseInt(process.env.DEFAULT_LEVERAGE) || 10,
-                    hitTp1: false,
-                    hitTp2: false,
-                    isPartiallyClosed: false,
-                    initialQty: parseFloat(entry) > 0 ? (parseFloat(process.env.TRADE_QUANTITY_USDT || 20) * (parseInt(process.env.DEFAULT_LEVERAGE || 10))) / parseFloat(entry) : 0,
-                    precision: { price: 2, quantity: 3 }, // Default fallback, will be refined in executeBinanceTrade
-                    timestamp: Date.now()
-                  };
                   console.log(`[tracker] Start tracking: ${item.symbol}`);
-                  saveActiveTrades(activeTrades); // ATOMIC SAVING: Simpan detik ini juga!
                 }
               } else {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: Konfidensi (${item.signal.confidence}%) < target (${autoTradeMinConf}%)`);
@@ -1526,7 +1518,7 @@ function initBinanceWebSocket() {
     wsStatus = 'CONNECTED';
   });
 
-  wsConnection.on('message', (data) => {
+  wsConnection.on('message', async (data) => {
     try {
       const tickers = JSON.parse(data);
       if (!Array.isArray(tickers)) return;
@@ -1534,7 +1526,7 @@ function initBinanceWebSocket() {
       const activeTrades = loadActiveTrades();
       let modified = false;
 
-      tickers.forEach(t => {
+      for (const t of tickers) {
         const symbol = t.s;
         const currentPrice = parseFloat(t.c);
         livePrices[symbol] = currentPrice;
@@ -1542,12 +1534,12 @@ function initBinanceWebSocket() {
         // Cek trade yang sedang berjalan (menggunakan cache memori agar instan/irit)
         if (activeTrades[symbol]) {
           const trade = activeTrades[symbol];
-          const result = checkTradeLevels(trade, currentPrice, activeTrades);
+          const result = await checkTradeLevels(symbol, currentPrice, activeTrades);
           if (result.modified) {
             modified = true;
           }
         }
-      });
+      }
 
       if (modified) {
         saveActiveTrades(activeTrades);
@@ -1637,7 +1629,7 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
            const tp1Price = trade.tp1;
            const finalBePrice = parseFloat((trade.type === 'LONG' ? tp1Price / 1.001 : tp1Price / 0.999).toFixed(trade.precision?.price || 2));
            
-           const beSuccess = await moveStopLossToBreakEven(sym, finalBePrice, trade.type);
+           const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, finalBePrice);
            if (beSuccess) {
               trade.sl = finalBePrice;
               trade.slMovedToTp1 = true;
@@ -1668,7 +1660,7 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
               const bePrice = trade.type === 'LONG' ? trade.entry * 1.001 : trade.entry * 0.999;
               const finalBePrice = parseFloat(bePrice.toFixed(trade.precision?.price || 2));
               
-              const beSuccess = await moveStopLossToBreakEven(sym, finalBePrice, trade.type);
+              const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, finalBePrice);
               if (beSuccess) trade.sl = finalBePrice;
               
               changed = true;
@@ -1704,7 +1696,7 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
           const newSlPriceRaw = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
           const newSlPrice = parseFloat(newSlPriceRaw.toFixed(trade.precision?.price || 2));
           
-          const beSuccess = await moveStopLossToBreakEven(sym, newSlPrice, trade.type);
+          const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, newSlPrice);
           if (beSuccess) {
               trade.last_pnl_step = currentStep;
               trade.sl = newSlPrice;
