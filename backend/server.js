@@ -28,7 +28,7 @@ function parseBaseUrls() {
     process.env.BINANCE_BASE_URL ||
     DEFAULT_BINANCE_BASE_URL;
 
-  return Array.from(
+  const urls = Array.from(
     new Set(
       raw
         .split(',')
@@ -36,6 +36,14 @@ function parseBaseUrls() {
         .filter(Boolean)
     )
   );
+  
+  // Always add fallback to official Binance if proxy is used
+  if (urls.length > 0 && !urls.includes('https://fapi.binance.com')) {
+    urls.push('https://fapi.binance.com');
+    console.log('[startup] Added fallback to official Binance endpoint');
+  }
+  
+  return urls;
 }
 
 const BINANCE_BASE_URLS = parseBaseUrls();
@@ -228,17 +236,43 @@ api.interceptors.request.use((config) => {
 async function safeGet(url, params = {}, retries = 3) {
   for (let i = 0; i <= retries; i++) {
     try {
-      return await api.get(url, { params });
+      const result = await api.get(url, { params });
+      if (i > 0) {
+        console.log(`[api] Recovered after ${i} retry/ies`);
+      }
+      return result;
     } catch (error) {
       const status = error.response?.status;
-      // Jika Rate Limit (429) atau Service Unavailable (503), putar URL dan COOLDOWN lebih lama
-      if ((status === 429 || status === 503 || !error.response) && i < retries) {
-        const wait = status === 429 ? 3000 + (i * 2000) : 500;
-        console.warn(`[api] Error ${status || 'network'}. Rotating URL & cooldown ${wait}ms...`);
-        rotateBaseUrl();
-        await sleep(wait); 
+      const code = error.code;
+      const isLastAttempt = i >= retries;
+      
+      // Determine if we should retry
+      const shouldRetry = !isLastAttempt && (
+        status === 429 ||   // Rate limited
+        status === 503 ||   // Service unavailable
+        status === 502 ||   // Bad gateway
+        code === 'ECONNREFUSED' ||
+        code === 'ETIMEDOUT' ||
+        code === 'ECONNRESET' ||
+        !error.response    // Network error (no response)
+      );
+
+      if (shouldRetry) {
+        // Increase wait time for consecutive retries
+        const baseWait = status === 429 ? 2000 : status === 503 ? 1000 : 500;
+        const wait = baseWait + (i * 500);
+        console.warn(`[api] ${url} failed (status: ${status || code}). Retry ${i + 1}/${retries} after ${wait}ms...`);
+        
+        // Try next URL on network/connection errors
+        if (!error.response || status >= 500) {
+          rotateBaseUrl();
+        }
+        
+        await sleep(wait);
         continue;
       }
+      
+      // If no more retries, throw
       throw error;
     }
   }
@@ -1148,17 +1182,30 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       safeGet('/fapi/v1/premiumIndex', { symbol }),
     ]);
 
+    // Validate responses exist
+    if (!klinesRes?.data || !klines4hRes?.data || !tickerRes?.data || !fundingRes?.data) {
+      throw new Error(`Invalid API response - missing data for ${symbol}`);
+    }
+
     const klines = klinesRes.data;
     const klines4h = klines4hRes.data;
     const ticker = tickerRes.data;
     const funding = fundingRes.data;
 
     // 1b. Liquidity Verification (24h Volume)
-    const quoteVol24h = parseFloat(ticker.quoteVolume);
-    const minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT) || 50000000;
-    if (quoteVol24h < minVol && !full) {
-      console.log(`[analyze] Skip ${symbol}: Volume 24jam ($${(quoteVol24h/1000000).toFixed(1)}M) di bawah batas ($${(minVol/1000000).toFixed(1)}M)`);
-      return { symbol, skip: true, reason: 'LOW_LIQUIDITY' };
+    // SKIP volume check if on testnet (testnet pairs may have low volume)
+    if (!USE_TESTNET) {
+      const quoteVol24h = parseFloat(ticker.quoteVolume);
+      // Use environment min volume OR testnet minimum (1M USDT) when using small custom watchlist
+      let minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT);
+      if (!minVol) {
+        // If custom watchlist <= 15 pairs, use 1M minimum (testnet friendly)
+        minVol = WATCHLIST.length <= 15 ? 1000000 : 50000000;
+      }
+      if (quoteVol24h < minVol && !full) {
+        console.log(`[analyze] Skip ${symbol}: Volume 24jam ($${(quoteVol24h/1000000).toFixed(1)}M) di bawah batas ($${(minVol/1000000).toFixed(1)}M)`);
+        return { symbol, skip: true, reason: 'LOW_LIQUIDITY' };
+      }
     }
 
     if (!Array.isArray(klines) || klines.length === 0) {
@@ -1234,7 +1281,10 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     return result;
 
   } catch (err) {
-    console.error(`[analyze] Error for ${symbol}:`, err.message);
+    const status = err.response?.status;
+    const code = err.code;
+    const msg = err.response?.data?.msg || err.message;
+    console.error(`[analyze] Error for ${symbol}: HTTP ${status || code || 'unknown'} - ${msg}`);
     throw err;
   }
 }
@@ -2203,8 +2253,9 @@ app.get('/api/scanner', async (req, res) => {
         const err = res.reason;
         const normalized = normalizeAxiosError(err);
         failures.push(symbol);
-        failureDetails.push({ symbol, error: normalized?.message || 'Unknown batch error' });
-        console.error(`  fail ${symbol}: ${normalized?.message || 'Unknown error'}`);
+        const errMsg = normalized?.message || JSON.stringify(err)?.substring(0, 100) || 'Unknown batch error';
+        failureDetails.push({ symbol, error: errMsg });
+        console.error(`  fail ${symbol}: ${errMsg}`);
       }
     }
     
