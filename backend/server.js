@@ -665,6 +665,8 @@ async function executeBinanceTrade(signalData, netPnL = null) {
         entry: parseFloat(signal.levels.entry),
         initialQty: executedQty,
         precision: precision,
+        margin: usdtAmount,
+        leverage: leverage,
         tp1: parseFloat(signal.levels.tp1),
         tp2: parseFloat(signal.levels.tp2),
         tp3: parseFloat(signal.levels.tp3),
@@ -672,6 +674,7 @@ async function executeBinanceTrade(signalData, netPnL = null) {
         isPartiallyClosed: false,
         hitTp1: false,
         hitTp2: false,
+        last_pnl_step: 0,
         timestamp: Date.now()
       };
 
@@ -1953,23 +1956,28 @@ function loadHistory() {
   return [];
 }
 
-function saveToHistory(trade) {
+function saveToHistory(trade, exitPrice = null, reason = 'UNKNOWN') {
   const history = loadHistory();
-  const margin = parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
-  const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
+  const margin = trade.margin || parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
+  const leverage = trade.leverage || parseInt(process.env.DEFAULT_LEVERAGE) || 10;
+  
+  // Set exit price jika diberikan
+  const finalExit = exitPrice || trade.exit || trade.entry;
   
   // Hitung profit nominal (USDT)
   const isLong = trade.type === 'LONG';
   const pnlPercent = isLong 
-    ? ((trade.exit - trade.entry) / trade.entry) * 100 
-    : ((trade.entry - trade.exit) / trade.entry) * 100;
+    ? ((finalExit - trade.entry) / trade.entry) * 100 
+    : ((trade.entry - finalExit) / trade.entry) * 100;
   const pnlUsdt = (pnlPercent / 100) * (margin * leverage);
 
   const entry = {
     ...trade,
+    exit: finalExit,
+    reason: reason,
     pnlPercent: parseFloat(pnlPercent.toFixed(2)),
     pnlUsdt: parseFloat(pnlUsdt.toFixed(2)),
-    timestamp: Date.now()
+    closedAt: Date.now()
   };
 
   // Anti-Duplicate: Catat koin ini baru saja ditutup (Cooldown 5 menit)
@@ -1982,7 +1990,7 @@ function saveToHistory(trade) {
   
   try {
     fs.writeFileSync(TRADE_HISTORY_FILE, JSON.stringify(trimmed, null, 2), 'utf8');
-    console.log(`[history] Trade ${trade.symbol} tersimpan. PnL: ${entry.pnlUsdt} USDT`);
+    console.log(`[history] Trade ${trade.symbol} tersimpan. Exit: $${finalExit} | PnL: ${entry.pnlUsdt} USDT (${reason})`);
   } catch (e) {
     console.error('[history] Gagal menyimpan trade_history.json:', e.message);
   }
@@ -2438,10 +2446,15 @@ async function adoptOrphanPositions() {
            entry: entryPrice,
            leverage: leverage,
            margin: margin,
+           initialQty: Math.abs(parseFloat(pos.positionAmt)),
            tp1: side === 'LONG' ? entryPrice * 1.01 : entryPrice * 0.99,
            tp2: side === 'LONG' ? entryPrice * 1.02 : entryPrice * 0.98,
            tp3: side === 'LONG' ? entryPrice * 1.03 : entryPrice * 0.97,
            sl: side === 'LONG' ? entryPrice * 0.98 : entryPrice * 1.02,
+           isPartiallyClosed: false,
+           hitTp1: false,
+           hitTp2: false,
+           last_pnl_step: 0,
            timestamp: Date.now(),
            adopted: true
         };
