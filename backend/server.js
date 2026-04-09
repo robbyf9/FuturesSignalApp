@@ -439,48 +439,119 @@ async function getBinanceOpenOrders(symbol = null) {
   }
 }
 
+// =============================================================
+// ALGO ORDER API (For SL/TP/Trailing - Binance Migration 2025+)
+// =============================================================
+
+/**
+ * Place a conditional order (SL/TP) via Algo Order API
+ * Replaces: tradingApi.post('/fapi/v1/order', ...) for STOP_MARKET / TAKE_PROFIT_MARKET
+ */
+async function placeAlgoOrder({ symbol, side, type, triggerPrice, closePosition = 'true', workingType = 'MARK_PRICE' }) {
+  const params = signRequest({
+    symbol,
+    side,
+    type,
+    triggerPrice,
+    closePosition,
+    workingType,
+    algoType: 'CONDITIONAL'
+  });
+  const res = await tradingApi.post('/fapi/v1/algoOrder', params);
+  return res.data;
+}
+
+/**
+ * Get all open Algo Orders (for checking if SL/TP exists)
+ * Replaces: getBinanceOpenOrders() filtering by type === 'STOP_MARKET'
+ */
+async function getOpenAlgoOrders(symbol = null) {
+  try {
+    const params = {};
+    if (symbol) params.symbol = symbol;
+    const orders = await fetchSigned('GET', '/fapi/v1/openAlgoOrders', params);
+    // API returns { rows: [...] }
+    if (orders && Array.isArray(orders.rows)) return orders.rows;
+    if (Array.isArray(orders)) return orders;
+    return [];
+  } catch (err) {
+    console.error(`[binance] Gagal ambil open algo orders ${symbol || ''}:`, err.response?.data?.msg || err.message);
+    return [];
+  }
+}
+
+/**
+ * Cancel all open Algo Orders for a symbol
+ * Replaces: fetchSigned('DELETE', '/fapi/v1/order', { symbol, orderId })
+ */
+async function cancelAllAlgoOrders(symbol) {
+  try {
+    await fetchSigned('DELETE', '/fapi/v1/algoOpenOrders', { symbol });
+    console.log(`[algo] All algo orders cancelled for ${symbol}`);
+    return true;
+  } catch (err) {
+    console.error(`[algo] Gagal cancel algo orders ${symbol}:`, err.response?.data?.msg || err.message);
+    return false;
+  }
+}
+
+/**
+ * Cancel a specific Algo Order by algoId
+ */
+async function cancelAlgoOrder(symbol, algoId) {
+  try {
+    await fetchSigned('DELETE', '/fapi/v1/algoOrder', { symbol, algoId });
+    console.log(`[algo] Algo order ${algoId} cancelled for ${symbol}`);
+    return true;
+  } catch (err) {
+    console.error(`[algo] Gagal cancel algo order ${algoId}:`, err.response?.data?.msg || err.message);
+    return false;
+  }
+}
+
 async function moveStopLossToBreakEven(symbol, entryPrice, side, manualPrice = null) {
   if (process.env.TRADING_ENABLED !== 'true') return false;
   
   try {
     const info = await getExchangeInfo();
     const precision = getSymbolPrecision(symbol, info);
+    const isLong = side === 'BUY' || side === 'LONG';
     
-    // 1. Ambil Open Orders untuk mencari SL (STOP_MARKET)
+    // 1. Cancel semua algo orders lama (SL/TP) untuk symbol ini
+    //    lalu pasang ulang SL baru saja
+    const algoOrders = await getOpenAlgoOrders(symbol);
+    const slAlgoOrders = algoOrders.filter(o => o.type === 'STOP_MARKET');
+    
+    for (const order of slAlgoOrders) {
+      await cancelAlgoOrder(symbol, order.algoId);
+      console.log(`[trade] SL Algo Lama Dibatalkan: ${symbol} (${order.algoId})`);
+    }
+
+    // Juga coba cancel dari standard orders (backward compatibility)
     const openOrders = await getBinanceOpenOrders(symbol);
-    const slOrders = openOrders.filter(o => o.type === 'STOP_MARKET');
-    
-    // 2. Batalkan semua SL lama
-    for (const order of slOrders) {
-      await fetchSigned('DELETE', '/fapi/v1/order', {
-        symbol,
-        orderId: order.orderId
-      });
-      console.log(`[trade] SL Lama Dibatalkan: ${symbol} (${order.orderId})`);
+    const slStdOrders = openOrders.filter(o => o.type === 'STOP_MARKET');
+    for (const order of slStdOrders) {
+      await fetchSigned('DELETE', '/fapi/v1/order', { symbol, orderId: order.orderId }).catch(() => {});
     }
     
-    // 3. Pasang SL Baru
+    // 2. Hitung harga SL baru
     let finalBePrice;
     if (manualPrice !== null) {
-      // Jika harga diberikan manual (e.g. Trailing SL), gunakan langsung
       finalBePrice = parseFloat(parseFloat(manualPrice).toFixed(precision.price));
     } else {
-      // Jika harga Entry (Break-Even), tambahkan 0.1% buffer fee
-      const isLong = side === 'BUY' || side === 'LONG';
       const bePrice = isLong ? entryPrice * 1.001 : entryPrice * 0.999;
       finalBePrice = parseFloat(bePrice.toFixed(precision.price));
     }
     
-    const slParams = signRequest({
+    // 3. Pasang SL Baru via Algo Order API
+    await placeAlgoOrder({
       symbol,
       side: isLong ? 'SELL' : 'BUY',
       type: 'STOP_MARKET',
-      stopPrice: finalBePrice,
+      triggerPrice: finalBePrice,
       closePosition: 'true',
       workingType: 'MARK_PRICE'
     });
-    
-    await tradingApi.post('/fapi/v1/order', slParams);
     
     console.log(`[trade] SL Moved to Break-Even: ${symbol} @ ${finalBePrice}`);
     await sendTelegramMessage(`🛡️ *SL PLUS ACTIVATED: ${symbol}* 🛡️\n\nStop Loss telah digeser ke harga Entry (${finalBePrice}) untuk mengunci keuntungan. Trade ini sekarang aman dari kerugian (Risk-Free)!`);
@@ -605,17 +676,16 @@ async function executeBinanceTrade(signalData, netPnL = null) {
       };
 
         try {
-          // TP Order (Take Profit Market)
-          const tpParams = signRequest({
+          // TP Order (Take Profit Market) via Algo API
+          await placeAlgoOrder({
             symbol,
             side: oppositeSide,
             type: 'TAKE_PROFIT_MARKET',
-            stopPrice: tpPrice,
+            triggerPrice: tpPrice,
             closePosition: 'true',
             workingType: 'MARK_PRICE'
           });
-          await tradingApi.post('/fapi/v1/order', tpParams);
-          console.log(`[trade] TP Terpasang: TP2 @ ${tpPrice}`);
+          console.log(`[trade] TP Terpasang (Algo): TP2 @ ${tpPrice}`);
         } catch (tpErr) {
           const errMsg = tpErr.response?.data?.msg || tpErr.message;
           const errCode = tpErr.response?.data?.code || 'N/A';
@@ -624,23 +694,23 @@ async function executeBinanceTrade(signalData, netPnL = null) {
         }
 
         try {
-          // SL Order (Stop Market)
-          const slParams = signRequest({
+          // SL Order (Stop Market) via Algo API
+          await placeAlgoOrder({
             symbol,
             side: oppositeSide,
             type: 'STOP_MARKET',
-            stopPrice: slPrice,
+            triggerPrice: slPrice,
             closePosition: 'true',
             workingType: 'MARK_PRICE'
           });
-          await tradingApi.post('/fapi/v1/order', slParams);
-          console.log(`[trade] SL Terpasang: SL @ ${slPrice}`);
+          console.log(`[trade] SL Terpasang (Algo): SL @ ${slPrice}`);
         } catch (slErr) {
           const errMsg = slErr.response?.data?.msg || slErr.message;
           const errCode = slErr.response?.data?.code || 'N/A';
           console.error(`[trade] Gagal pasang SL ${symbol} (${errCode}):`, errMsg);
           await sendTelegramMessage(`⚠️ *Gagal Pasang SL ${symbol}* (Code: ${errCode})\n\nError: ${errMsg}\nParams: side=${oppositeSide}, price=${slPrice}`);
         }
+
 
         await sendTelegramMessage(`🚀 *AUTO-TRADE EXECUTED* 🚀\n\nKoin: ${symbol}\nTipe: ${side}\nLeverage: ${leverage}x\nEntry: ${price}\nTP2: ${tpPrice}\nSL: ${slPrice}\n\n_Eksekusi Berhasil!_`);
         
@@ -2436,40 +2506,44 @@ async function monitorActiveTrades() {
         sendTelegramMessage(`ℹ️ *TRADE CLOSED: ${sym}* ℹ️\n\nPosisi telah ditutup (${reason}). Data telah dipindahkan ke History.`);
       } else if (livePos && process.env.TRADING_ENABLED === 'true') {
         // SELF-HEALING: Jika posisi terbuka tapi TP/SL tidak ada di bursa, pasang ulang
+        // Check both standard orders AND algo orders
         const coinOrders = openOrders.filter(o => o.symbol === sym);
-        const hasTp = coinOrders.some(o => o.type === 'TAKE_PROFIT_MARKET');
-        const hasSl = coinOrders.some(o => o.type === 'STOP_MARKET');
+        const algoOrders = await getOpenAlgoOrders(sym);
+        
+        const hasTp = coinOrders.some(o => o.type === 'TAKE_PROFIT_MARKET') || 
+                      algoOrders.some(o => o.type === 'TAKE_PROFIT_MARKET');
+        const hasSl = coinOrders.some(o => o.type === 'STOP_MARKET') || 
+                      algoOrders.some(o => o.type === 'STOP_MARKET');
 
         if (!hasTp && trade.tp2) {
-          console.log(`[self-healing] Menemukan TP hilang untuk ${sym}. Memasang ulang...`);
+          console.log(`[self-healing] Menemukan TP hilang untuk ${sym}. Memasang ulang via Algo API...`);
           const info = await getExchangeInfo();
           const prec = getSymbolPrecision(sym, info);
-          const tpParams = signRequest({
+          await placeAlgoOrder({
             symbol: sym,
             side: trade.type === 'LONG' ? 'SELL' : 'BUY',
             type: 'TAKE_PROFIT_MARKET',
-            stopPrice: parseFloat(trade.tp2).toFixed(prec.price),
+            triggerPrice: parseFloat(trade.tp2).toFixed(prec.price),
             closePosition: 'true',
             workingType: 'MARK_PRICE'
-          });
-          await tradingApi.post('/fapi/v1/order', tpParams).catch(e => console.error(`[self-healing] Gagal pasang TP ${sym}:`, e.message));
+          }).catch(e => console.error(`[self-healing] Gagal pasang TP ${sym}:`, e.response?.data?.msg || e.message));
         }
 
         if (!hasSl && trade.sl) {
-          console.log(`[self-healing] Menemukan SL hilang untuk ${sym}. Memasang ulang...`);
+          console.log(`[self-healing] Menemukan SL hilang untuk ${sym}. Memasang ulang via Algo API...`);
           const info = await getExchangeInfo();
           const prec = getSymbolPrecision(sym, info);
-          const slParams = signRequest({
+          await placeAlgoOrder({
             symbol: sym,
             side: trade.type === 'LONG' ? 'SELL' : 'BUY',
             type: 'STOP_MARKET',
-            stopPrice: parseFloat(trade.sl).toFixed(prec.price),
+            triggerPrice: parseFloat(trade.sl).toFixed(prec.price),
             closePosition: 'true',
             workingType: 'MARK_PRICE'
-          });
-          await tradingApi.post('/fapi/v1/order', slParams).catch(e => console.error(`[self-healing] Gagal pasang SL ${sym}:`, e.message));
+          }).catch(e => console.error(`[self-healing] Gagal pasang SL ${sym}:`, e.response?.data?.msg || e.message));
         }
       }
+
     }
     
     if (historyChanged) saveActiveTrades(activeTrades);
@@ -2656,9 +2730,10 @@ app.get('/api/cron-run', async (req, res) => {
 app.get('/api/active-trades', async (req, res) => {
   try {
     const activeTrades = loadActiveTrades();
-    const [positions, openOrders] = await Promise.all([
+    const [positions, openOrders, algoOrders] = await Promise.all([
       getBinancePositions(),
-      getBinanceOpenOrders()
+      getBinanceOpenOrders(),
+      getOpenAlgoOrders()
     ]);
     
     if (positions.length === 0) return res.json([]);
@@ -2674,10 +2749,18 @@ app.get('/api/active-trades', async (req, res) => {
         ? ((mark - entry) / entry) * 100 
         : ((entry - mark) / entry) * 100;
         
-      // Cari TP/SL dari open orders koin ini
+      // Cari TP/SL dari standard orders DAN algo orders
       const coinOrders = openOrders.filter(o => o.symbol === sym);
-      const tpOrder = coinOrders.find(o => o.type === 'TAKE_PROFIT_MARKET');
-      const slOrder = coinOrders.find(o => o.type === 'STOP_MARKET');
+      const coinAlgoOrders = algoOrders.filter(o => o.symbol === sym);
+      
+      const tpOrder = coinOrders.find(o => o.type === 'TAKE_PROFIT_MARKET') || 
+                      coinAlgoOrders.find(o => o.type === 'TAKE_PROFIT_MARKET');
+      const slOrder = coinOrders.find(o => o.type === 'STOP_MARKET') || 
+                      coinAlgoOrders.find(o => o.type === 'STOP_MARKET');
+
+      // Algo orders use triggerPrice, standard orders use stopPrice
+      const tpPrice = tpOrder ? parseFloat(tpOrder.stopPrice || tpOrder.triggerPrice) : null;
+      const slPrice = slOrder ? parseFloat(slOrder.stopPrice || slOrder.triggerPrice) : null;
 
       return {
         symbol: sym,
@@ -2688,12 +2771,13 @@ app.get('/api/active-trades', async (req, res) => {
         pnlPercent: parseFloat(pnlPercent.toFixed(2)),
         margin: parseFloat(pos.isolatedWallet || 0),
         leverage: pos.leverage,
-        tp: tpOrder ? parseFloat(tpOrder.stopPrice) : null,
-        sl: slOrder ? parseFloat(slOrder.stopPrice) : null,
+        tp: tpPrice,
+        sl: slPrice,
         last_pnl_step: activeTrades[sym]?.last_pnl_step || 0,
         timestamp: Date.now()
       };
     });
+
     
     res.json(results);
   } catch (err) {
