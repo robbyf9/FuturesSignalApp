@@ -2050,7 +2050,8 @@ async function runBackgroundScanner() {
             
             const meetsConfidence = item.signal.confidence >= requiredConf;
             const meetsScore = Math.abs(item.signal.score) >= requiredScore;
-            const trendAligned = item.signal.htfTrend === currentType;
+            const trendAligned = (item.signal.htfTrend === 'BULLISH' && currentType === 'LONG') || 
+                                 (item.signal.htfTrend === 'BEARISH' && currentType === 'SHORT');
 
             if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
               if (meetsConfidence && meetsScore && trendAligned) {
