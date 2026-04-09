@@ -2376,9 +2376,9 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
     }
   }
 
-  // --- 🔥 DYNAMIC TRAILING SL ($ STEP) Logic ---
+  // --- 🔥 HYBRID TRAILING SL ($ OFFSET) Logic ---
   const settings = loadSettings();
-  const step = settings.fixed_tp_usdt;
+  const step = settings.fixed_tp_usdt; // Jarak/Buffer (0.5 USDT)
   
   if (step > 0 && process.env.TRADING_ENABLED === 'true') {
       const margin = trade.margin || parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
@@ -2389,30 +2389,40 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
         ? ((currentPrice - trade.entry) / trade.entry) * posValue 
         : ((trade.entry - currentPrice) / trade.entry) * posValue;
       
-      const currentStep = Math.floor(pnlUsdt / step);
-      const lastStep = trade.last_pnl_step || 0;
-      
-      if (currentStep > lastStep && currentStep >= 1) {
-          // LANGSUNG lompat ke step yang benar (bukan +1)
-          const targetProfitUsdt = (currentStep - 1) * step;
+      let newSlPriceRaw = null;
+
+      // KONDISI A: Profit mencapai min 1 step ($0.5), kunci ke BE (Entry)
+      if (pnlUsdt >= step && pnlUsdt < (step * 2)) {
+          const bePrice = isLong ? trade.entry * 1.001 : trade.entry * 0.999;
+          newSlPriceRaw = bePrice;
+      } 
+      // KONDISI B: Profit mencapai min 2 step ($1.0), aktifkan Trailing Offset ($0.5)
+      else if (pnlUsdt >= (step * 2)) {
+          const targetProfitUsdt = pnlUsdt - step; // Selalu berjarak 0.5 USDT di bawah harga running
           const priceDiff = (targetProfitUsdt / posValue) * trade.entry;
-          const newSlPriceRaw = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
+          newSlPriceRaw = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
+      }
+
+      if (newSlPriceRaw !== null) {
           const newSlPrice = parseFloat(newSlPriceRaw.toFixed(trade.precision?.price || 4));
           
-          console.log(`[trailing-sl] ${sym} pnl=$${pnlUsdt.toFixed(2)} step=${currentStep} (was ${lastStep}) | lock=$${targetProfitUsdt.toFixed(2)} | newSL=${newSlPrice}`);
+          // PROTEKSI: Hanya pindahkan SL jika harga baru LEBIH BAIK dari SL saat ini
+          const currentSl = trade.sl || (isLong ? 0 : 999999);
+          const isBetter = isLong ? (newSlPrice > currentSl) : (newSlPrice < currentSl);
+
+          // Berikan toleransi perubahan minimal agar tidak terlalu sering hit API (misalnya selisih minimal 0.05 USDT profit)
+          const profitDiff = Math.abs(newSlPrice - currentSl) * (posValue / trade.entry);
           
-          const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, newSlPrice);
-          if (beSuccess) {
-              trade.sl = newSlPrice;
-              console.log(`[trailing-sl] ✅ ${sym} SL berhasil digeser ke ${newSlPrice}`);
-              await sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit: $${pnlUsdt.toFixed(2)}\nSL digeser dari step ${lastStep} → ${currentStep}\nSL Baru: $${newSlPrice}\nProfit terkunci: $${targetProfitUsdt.toFixed(2)}`);
-          } else {
-              console.error(`[trailing-sl] ❌ ${sym} Gagal geser SL ke ${newSlPrice}. Akan retry di cycle berikutnya.`);
+          if (isBetter && profitDiff > 0.05) {
+              console.log(`[trailing-sl] ${sym} PnL=$${pnlUsdt.toFixed(2)} | Menggeser SL ke $${newSlPrice} (Lock Profit: ~$${(pnlUsdt - step).toFixed(2)})`);
+              
+              const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, newSlPrice);
+              if (beSuccess) {
+                  trade.sl = newSlPrice;
+                  changed = true;
+                  await sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit: $${pnlUsdt.toFixed(2)}\nSL Baru: $${newSlPrice}\nEstimasi Profit Terkunci: $${(pnlUsdt - step).toFixed(2)}`);
+              }
           }
-          // SELALU update step, bahkan jika gagal, agar tidak stuck di step yang sama
-          // Jika gagal, self-healing akan re-place SL di cycle berikutnya
-          trade.last_pnl_step = currentStep;
-          changed = true;
       }
   }
 
