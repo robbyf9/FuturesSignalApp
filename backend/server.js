@@ -410,17 +410,21 @@ async function getBTCStatus() {
     const klines = res.data;
     const closes = klines.map(k => parseFloat(k[4]));
     const currentPrice = closes[closes.length - 1];
+    const prevPrice15m = closes[closes.length - 4] || closes[0]; // ~15 mins ago
+    
+    const priceChange15m = ((currentPrice - prevPrice15m) / prevPrice15m) * 100;
     const ema20 = calcEMA(closes, 20);
     
     return {
        price: currentPrice,
+       priceChange15m: priceChange15m,
        ema20: ema20,
        isBullish: currentPrice > ema20,
        isPanic: closes[closes.length - 1] < closes[closes.length - 2] * 0.992 // Flash Crash 0.8% in 5m (Relaxed from 0.5%)
     };
   } catch (err) {
     console.error('[market-watch] Gagal ambil status BTC:', err.message);
-    return { isBullish: true, isPanic: false }; // Default safe if API fails
+    return { isBullish: true, isPanic: false, priceChange15m: 0 }; // Default safe if API fails
   }
 }
 
@@ -1431,9 +1435,22 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     else score -= 1;
   } else if (adx < 20) {
     // Sideways market - avoid trend followers, reduce scores drastically
-    score = score * 0.5; 
+    score = score * 0.6; // Slightly more generous than 0.5 
     sidewaysPenalty = true;
-    reasons.push(`Weak trend (ADX: ${adx}), STRICT penalty applied`);
+    reasons.push(`Weak trend (ADX: ${adx})`);
+  }
+
+  // ⭐ PHASE 3: RELATIVE STRENGTH VS BTC (Worth It Detection)
+  if (indicators.relativeStrength > 0.5) {
+    score += 3;
+    reasons.push(`💪 Outperforming BTC (+3)`);
+    if (indicators.relativeStrength > 1.5) {
+       score += 2;
+       reasons.push(`🚀 Strong Relative Strength (+2)`);
+    }
+  } else if (indicators.relativeStrength < -1.0) {
+    score -= 3;
+    reasons.push(`⚠️ Underperforming BTC (-3)`);
   }
 
   // 4. Bollinger Bands
@@ -1587,7 +1604,7 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
   };
 }
 
-async function analyzePair(symbol, interval = '1h', full = false) {
+async function analyzePair(symbol, interval = '1h', full = false, btcStatus = null) {
   try {
     const [klinesRes, klines4hRes, tickerRes, fundingRes] = await Promise.all([
       safeGet('/fapi/v1/klines', { symbol, interval, limit: full ? 200 : 100 }),
@@ -1607,17 +1624,13 @@ async function analyzePair(symbol, interval = '1h', full = false) {
     const funding = fundingRes.data;
 
     // 1b. Liquidity Verification (24h Volume)
-    // SKIP volume check if on testnet (testnet pairs may have low volume)
     if (!USE_TESTNET) {
       const quoteVol24h = parseFloat(ticker.quoteVolume);
-      // Use environment min volume OR testnet minimum (1M USDT) when using small custom watchlist
       let minVol = parseFloat(process.env.SCANNER_MIN_VOLUME_USDT);
       if (!minVol) {
-        // If custom watchlist <= 15 pairs, use 1M minimum (testnet friendly)
         minVol = WATCHLIST.length <= 15 ? 1000000 : 50000000;
       }
       if (quoteVol24h < minVol && !full) {
-        console.log(`[analyze] Skip ${symbol}: Volume 24jam ($${(quoteVol24h/1000000).toFixed(1)}M) di bawah batas ($${(minVol/1000000).toFixed(1)}M)`);
         return { symbol, skip: true, reason: 'LOW_LIQUIDITY' };
       }
     }
@@ -1626,9 +1639,18 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       throw new Error(`No kline data returned for ${symbol}`);
     }
 
+    // Calculate indicator data
     const closes = klines.map((kline) => parseFloat(kline[4]));
     const price = parseFloat(ticker.lastPrice);
     const fundingRate = parseFloat(funding.lastFundingRate) * 100;
+    
+    // Relative Strength Calculation (vs BTC)
+    let relativeStrength = 0;
+    if (btcStatus && btcStatus.priceChange15m !== undefined) {
+       const coinPrev15m = closes[closes.length - 4] || closes[0];
+       const coinPriceChange15m = ((price - coinPrev15m) / coinPrev15m) * 100;
+       relativeStrength = coinPriceChange15m - btcStatus.priceChange15m;
+    }
 
     const indicators = {
       rsi: calcRSI(closes),
@@ -1644,6 +1666,7 @@ async function analyzePair(symbol, interval = '1h', full = false) {
       atr: calcATR(klines),
       adxInfo: calcADX(klines),
       vwap: calcVWAP(klines.slice(-24)),
+      relativeStrength // Injecting RS here
     };
 
     // CALCULATE RELATIVE VOLUME (RVOL)
@@ -1996,18 +2019,21 @@ async function runBackgroundScanner() {
 
   const activeTrades = loadActiveTrades();
   const uniqueWatchlist = [...new Set(WATCHLIST)];
+  
+  // List Koin Utama untuk Syarat Standar (Lainnya harus syarat ketat)
+  const CORE_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'MATICUSDT', 'DOTUSDT', 'TRXUSDT', 'LTCUSDT', 'DOGEUSDT', 'LINKUSDT']);
 
   for (let i = 0; i < uniqueWatchlist.length; i += batchSize) {
     const batch = uniqueWatchlist.slice(i, i + batchSize);
     const settled = await Promise.allSettled(
-      batch.map((symbol) => analyzePair(symbol, interval, false))
+      batch.map((symbol) => analyzePair(symbol, interval, false, btcStatus))
     );
 
     for (const result of settled) {
       if (result.status === 'fulfilled') {
         const item = result.value;
         if (Math.abs(item.signal.score) >= minScore) {
-          const entry = item.market ? item.market.price : item.price;
+          const isCore = CORE_SYMBOLS.has(item.symbol);
           const currentType = item.signal.signal.includes('LONG') ? 'LONG' : 'SHORT';
           const existing = activeTrades[item.symbol];
           
@@ -2017,11 +2043,17 @@ async function runBackgroundScanner() {
           
           if ((!existing || existing.type !== currentType) && !hasRealPosition) {
             // 🔥 SPEED OPTIMIZATION: Check confidence and execute trade BEFORE Telegram (saves 1-2s)
-            const meetsConfidence = item.signal.confidence >= autoTradeMinConf;
+            
+            // STRICT THRESHOLD FOR ALTCOINS (Non-Core)
+            const requiredConf = isCore ? autoTradeMinConf : Math.max(85, autoTradeMinConf + 5);
+            const requiredScore = isCore ? minScore : Math.max(10, minScore + 1);
+            
+            const meetsConfidence = item.signal.confidence >= requiredConf;
+            const meetsScore = Math.abs(item.signal.score) >= requiredScore;
             const trendAligned = item.signal.htfTrend === currentType;
 
             if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
-              if (meetsConfidence && trendAligned) {
+              if (meetsConfidence && meetsScore && trendAligned) {
                 // ✅ PHASE 2: Multi-Timeframe Confirmation (65-70% target)
                 const mtfConfirm = await confirmMultiTimeframe(item.symbol, currentType);
                 
@@ -2030,11 +2062,9 @@ async function runBackgroundScanner() {
                 
                 // ✅ PHASE 3: Pattern-based validation
                 const hasStrongPattern = item.signal.reasons?.some(r => r.includes('📦') || r.includes('📈') || r.includes('📉'));
-                const volumeNotlow = item.signal.reasons?.some(r => r.includes('📊')) || !item.signal.reasons?.some(r => r.includes('⚠️'));
                 
-                // Only execute if all checks pass
-                // LOGIC: Relaxed execution if score is very high (>= 9)
-                const isVeryStrong = Math.abs(item.signal.score) >= 9;
+                // LOGIC: Relaxed execution if score is very high (>= 9 for Core, >= 11 for Alts)
+                const isVeryStrong = isCore ? Math.abs(item.signal.score) >= 9 : Math.abs(item.signal.score) >= 11;
                 const canExecute = (mtfConfirm.consensus === 'STRONG' || (isVeryStrong && mtfConfirm.consensus === 'WEAK')) && 
                                    !corrCheck.conflict && 
                                    (!item.signal.reasons?.some(r => r.includes('⚠️')));
@@ -2059,11 +2089,14 @@ async function runBackgroundScanner() {
                     await sendTelegramMessage(`⚠️ *AUTO-TRADE SKIPPED: ${item.symbol}* ⚠️\n\nSignal Score: ${item.signal.score}\nReason: ${skipReason}\n\n_Auto-trade dibatalkan untuk menjaga keamanan akun._`);
                   }
                 }
-              } else if (meetsConfidence && !trendAligned) {
+              } else if (meetsConfidence && meetsScore && !trendAligned) {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: HTF Trend Conflict (${item.signal.htfTrend} vs ${currentType})`);
                 await sendTelegramMessage(`⚠️ *AUTO-TRADE SKIPPED: ${item.symbol}* ⚠️\n\nReason: HTF Trend Conflict (${item.signal.htfTrend} vs ${currentType})\n\n_Bot hanya entry jika searah dengan tren besar (4H)._`);
-              } else {
-                console.log(`[trade] Skip auto-trade ${item.symbol}: Konfidensi (${item.signal.confidence}%) < target (${autoTradeMinConf}%)`);
+              } else if (Math.abs(item.signal.score) >= minScore) {
+                 // Log why it didn't meet the stricter altcoin requirements
+                 if (!isCore) {
+                    console.log(`[trade] Skip auto-trade ${item.symbol}: Altcoin requirement not met (Score: ${item.signal.score}/${requiredScore}, Conf: ${item.signal.confidence}%/${requiredConf}%)`);
+                 }
               }
             }
 
