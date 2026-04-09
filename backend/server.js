@@ -2379,8 +2379,8 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
   const step = settings.fixed_tp_usdt;
   
   if (step > 0 && process.env.TRADING_ENABLED === 'true') {
-      const margin = trade.margin || 20;
-      const leverage = trade.leverage || 10;
+      const margin = trade.margin || parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
+      const leverage = trade.leverage || parseInt(process.env.DEFAULT_LEVERAGE) || 10;
       const posValue = margin * leverage;
       
       const pnlUsdt = isLong 
@@ -2388,23 +2388,32 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
         : ((trade.entry - currentPrice) / trade.entry) * posValue;
       
       const currentStep = Math.floor(pnlUsdt / step);
+      const lastStep = trade.last_pnl_step || 0;
       
-      if (currentStep > (trade.last_pnl_step || 0)) {
+      if (currentStep > lastStep && currentStep >= 1) {
+          // LANGSUNG lompat ke step yang benar (bukan +1)
           const targetProfitUsdt = (currentStep - 1) * step;
           const priceDiff = (targetProfitUsdt / posValue) * trade.entry;
           const newSlPriceRaw = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
-          const newSlPrice = parseFloat(newSlPriceRaw.toFixed(trade.precision?.price || 2));
+          const newSlPrice = parseFloat(newSlPriceRaw.toFixed(trade.precision?.price || 4));
+          
+          console.log(`[trailing-sl] ${sym} pnl=$${pnlUsdt.toFixed(2)} step=${currentStep} (was ${lastStep}) | lock=$${targetProfitUsdt.toFixed(2)} | newSL=${newSlPrice}`);
           
           const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, newSlPrice);
           if (beSuccess) {
-              trade.last_pnl_step = currentStep;
               trade.sl = newSlPrice;
-              changed = true;
-              console.log(`[trailing-sl] ${sym} profit=$${pnlUsdt.toFixed(2)} | target=$${targetProfitUsdt.toFixed(2)}. SL moved to ${newSlPrice}`);
-              await sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit mencapai $${pnlUsdt.toFixed(2)}. Stop Loss digeser ke $${fmtP(newSlPrice)} (+=$${step.toFixed(1)})`);
+              console.log(`[trailing-sl] ✅ ${sym} SL berhasil digeser ke ${newSlPrice}`);
+              await sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit: $${pnlUsdt.toFixed(2)}\nSL digeser dari step ${lastStep} → ${currentStep}\nSL Baru: $${newSlPrice}\nProfit terkunci: $${targetProfitUsdt.toFixed(2)}`);
+          } else {
+              console.error(`[trailing-sl] ❌ ${sym} Gagal geser SL ke ${newSlPrice}. Akan retry di cycle berikutnya.`);
           }
+          // SELALU update step, bahkan jika gagal, agar tidak stuck di step yang sama
+          // Jika gagal, self-healing akan re-place SL di cycle berikutnya
+          trade.last_pnl_step = currentStep;
+          changed = true;
       }
   }
+
 
   if (changed) saveActiveTrades(activeTrades);
   return { modified: changed };
