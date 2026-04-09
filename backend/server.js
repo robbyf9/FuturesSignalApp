@@ -2207,8 +2207,10 @@ async function runBackgroundScanner() {
 // WEBSOCKET MANAGER (LIVE STREAM)
 // -------------------------------------------------------------
 function initBinanceWebSocket() {
-  const wsUrl = 'wss://fstream.binance.com/ws/!ticker@arr';
-  console.log(`[ws] Menghubungkan ke ${wsUrl}...`);
+  const wsUrl = USE_TESTNET 
+    ? 'wss://fstream.binancefuture.com/ws/!ticker@arr'
+    : 'wss://fstream.binance.com/ws/!ticker@arr';
+  console.log(`[ws] Menghubungkan ke ${wsUrl} (${USE_TESTNET ? 'TESTNET' : 'MAINNET'})...`);
 
   wsConnection = new WebSocket(wsUrl);
 
