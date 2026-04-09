@@ -416,7 +416,7 @@ async function getBTCStatus() {
        price: currentPrice,
        ema20: ema20,
        isBullish: currentPrice > ema20,
-       isPanic: closes[closes.length - 1] < closes[closes.length - 2] * 0.995 // Flash Crash 0.5% in 5m
+       isPanic: closes[closes.length - 1] < closes[closes.length - 2] * 0.992 // Flash Crash 0.8% in 5m (Relaxed from 0.5%)
     };
   } catch (err) {
     console.error('[market-watch] Gagal ambil status BTC:', err.message);
@@ -2033,22 +2033,35 @@ async function runBackgroundScanner() {
                 const volumeNotlow = item.signal.reasons?.some(r => r.includes('📊')) || !item.signal.reasons?.some(r => r.includes('⚠️'));
                 
                 // Only execute if all checks pass
-                if (mtfConfirm.consensus === 'STRONG' && !corrCheck.conflict && (!item.signal.reasons?.some(r => r.includes('⚠️')))) {
+                // LOGIC: Relaxed execution if score is very high (>= 9)
+                const isVeryStrong = Math.abs(item.signal.score) >= 9;
+                const canExecute = (mtfConfirm.consensus === 'STRONG' || (isVeryStrong && mtfConfirm.consensus === 'WEAK')) && 
+                                   !corrCheck.conflict && 
+                                   (!item.signal.reasons?.some(r => r.includes('⚠️')));
+
+                if (canExecute) {
                   // EXECUTE TRADE IMMEDIATELY (FAST PATH)
                   const success = await executeBinanceTrade(item, dailyNetPnL);
                   if (success) {
                     currentOpenPositions++;
                     console.log(`[tracker] Start tracking: ${item.symbol}`);
                   }
-                } else if (corrCheck.conflict) {
-                  console.log(`[trade] Skip auto-trade ${item.symbol}: Correlation conflict with ${corrCheck.conflictPair} (${corrCheck.conflictType})`);
-                } else if (mtfConfirm.consensus === 'WEAK') {
-                  console.log(`[trade] Skip auto-trade ${item.symbol}: Multi-TF weak consensus (${mtfConfirm.agreements}/${mtfConfirm.total})`);
-                } else if (item.signal.reasons?.some(r => r.includes('⚠️'))) {
-                  console.log(`[trade] Skip auto-trade ${item.symbol}: Low volume breakout - not recommended`);
+                } else {
+                  // NOTIFY SKIP REASON ON TELEGRAM (Only for High Score)
+                  let skipReason = "";
+                  if (corrCheck.conflict) skipReason = `Correlation conflict with ${corrCheck.conflictPair}`;
+                  else if (mtfConfirm.consensus === 'WEAK' && !isVeryStrong) skipReason = `Multi-TF weak consensus (${mtfConfirm.agreements}/${mtfConfirm.total})`;
+                  else if (item.signal.reasons?.some(r => r.includes('⚠️'))) skipReason = `Low volume breakout warning`;
+                  
+                  if (skipReason) {
+                    console.log(`[trade] Skip auto-trade ${item.symbol}: ${skipReason}`);
+                    // Only send notification if score >= minScore (avoid spam)
+                    await sendTelegramMessage(`⚠️ *AUTO-TRADE SKIPPED: ${item.symbol}* ⚠️\n\nSignal Score: ${item.signal.score}\nReason: ${skipReason}\n\n_Auto-trade dibatalkan untuk menjaga keamanan akun._`);
+                  }
                 }
               } else if (meetsConfidence && !trendAligned) {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: HTF Trend Conflict (${item.signal.htfTrend} vs ${currentType})`);
+                await sendTelegramMessage(`⚠️ *AUTO-TRADE SKIPPED: ${item.symbol}* ⚠️\n\nReason: HTF Trend Conflict (${item.signal.htfTrend} vs ${currentType})\n\n_Bot hanya entry jika searah dengan tren besar (4H)._`);
               } else {
                 console.log(`[trade] Skip auto-trade ${item.symbol}: Konfidensi (${item.signal.confidence}%) < target (${autoTradeMinConf}%)`);
               }
