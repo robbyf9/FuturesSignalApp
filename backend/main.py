@@ -123,59 +123,201 @@ def calc_vwap(df: pd.DataFrame) -> float:
 
 # ─── Signal Engine ──────────────────────────────────────────────────────────────
 
-def generate_signal(indicators: dict, price: float, funding_rate: float):
+def validate_trend(df: pd.DataFrame, period_short=5, period_long=20):
+    """Validasi trend strength dengan multiple confirmations"""
+    closes = df["close"]
+    ema_short = closes.ewm(span=period_short, adjust=False).mean()
+    ema_long = closes.ewm(span=period_long, adjust=False).mean()
+    
+    current = closes.iloc[-1]
+    ema_s = ema_short.iloc[-1]
+    ema_l = ema_long.iloc[-1]
+    prev_close = closes.iloc[-2]
+    
+    # Hitung momentum
+    momentum = ((current - prev_close) / prev_close) * 100
+    
+    return {
+        "is_uptrend": ema_s > ema_l,
+        "ema_spread": ((ema_s - ema_l) / ema_l) * 100,
+        "momentum": momentum,
+        "is_strong_uptrend": ema_s > ema_l and momentum > 0.1,
+        "is_strong_downtrend": ema_s < ema_l and momentum < -0.1,
+    }
+
+def check_volume_strength(df: pd.DataFrame):
+    """Validasi volume untuk confirm signal"""
+    volumes = df["volume"]
+    current_vol = volumes.iloc[-1]
+    avg_vol = volumes.iloc[-20:-1].mean()
+    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
+    return round(vol_ratio, 2)
+
+def validate_candle_pattern(df: pd.DataFrame):
+    """Detect valid candle patterns untuk entry"""
+    closes = df["close"]
+    opens = df["open"]
+    highs = df["high"]
+    lows = df["low"]
+    
+    # Current candle
+    curr_open = opens.iloc[-1]
+    curr_close = closes.iloc[-1]
+    curr_high = highs.iloc[-1]
+    curr_low = lows.iloc[-1]
+    
+    # Previous candle
+    prev_close = closes.iloc[-2]
+    prev_open = opens.iloc[-2]
+    
+    body_size = abs(curr_close - curr_open)
+    wick_upper = curr_high - max(curr_open, curr_close)
+    wick_lower = min(curr_open, curr_close) - curr_low
+    
+    patterns = {
+        "is_hammer": wick_lower > body_size * 2 and wick_upper < body_size,
+        "is_reversal": curr_close > prev_close and curr_open < prev_close,
+        "is_strong_body": body_size > (curr_high - curr_low) * 0.6,
+        "is_bullish_engulf": curr_open < prev_open and curr_close > prev_close,
+    }
+    
+    return patterns
+
+def generate_signal(indicators: dict, price: float, funding_rate: float, df: pd.DataFrame = None):
     score = 0
     reasons = []
+    filters_passed = 0
+    max_filters = 5
 
+    # FILTER 1: TREND VALIDATION (CRITICAL)
+    if df is not None:
+        trend_data = validate_trend(df)
+        vol_strength = check_volume_strength(df)
+        candle_pattern = validate_candle_pattern(df)
+        
+        # Hanya enter jika EMA alignment strong
+        ema20, ema50, ema200 = indicators["ema20"], indicators["ema50"], indicators["ema200"]
+        
+        # LONG conditions - semua harus aligned
+        if ema20 > ema50 > ema200:  # Strong uptrend alignment
+            score += 4
+            reasons.append("✓ EMA alignment BULLISH (20>50>200)")
+            filters_passed += 1
+        else:
+            score -= 5
+            reasons.append("✗ Trend alignment BEARISH")
+
+        # SHORT conditions
+        if ema20 < ema50 < ema200:  # Strong downtrend alignment
+            score -= 4
+            reasons.append("✓ EMA alignment BEARISH (20<50<200)")
+            filters_passed += 1
+
+        # FILTER 2: MOMENTUM VALIDATION
+        if trend_data["is_strong_uptrend"]:
+            score += 3
+            reasons.append("✓ Strong uptrend momentum")
+            filters_passed += 1
+        elif trend_data["is_strong_downtrend"]:
+            score -= 3
+            reasons.append("✓ Strong downtrend momentum")
+
+        # FILTER 3: VOLUME CONFIRMATION
+        if vol_strength > 1.3:  # Volume harus 30% di atas rata-rata
+            score += 2
+            reasons.append(f"✓ Volume strong ({vol_strength:.1f}x avg)")
+            filters_passed += 1
+        elif vol_strength < 0.7:
+            score -= 2
+            reasons.append(f"✗ Volume weak ({vol_strength:.1f}x avg)")
+
+        # FILTER 4: CANDLE PATTERN
+        if candle_pattern["is_bullish_engulf"] or candle_pattern["is_hammer"]:
+            score += 2
+            reasons.append("✓ Bullish candle pattern")
+            filters_passed += 1
+        elif candle_pattern["is_reversal"] and candle_pattern["is_strong_body"]:
+            score += 1
+            reasons.append("✓ Potential reversal pattern")
+
+    # RSI - lebih ketat
     rsi = indicators["rsi"]
-    if rsi < 30: score += 3; reasons.append("RSI oversold (<30)")
-    elif rsi < 40: score += 2; reasons.append("RSI mendekati oversold")
-    elif rsi < 50: score += 1
-    elif rsi > 70: score -= 3; reasons.append("RSI overbought (>70)")
-    elif rsi > 60: score -= 2; reasons.append("RSI mendekati overbought")
+    if rsi < 25:
+        score += 2
+        reasons.append("RSI deeply oversold")
+    elif rsi < 35:
+        score += 1
+        reasons.append("RSI oversold")
+    elif rsi > 75:
+        score -= 2
+        reasons.append("RSI deeply overbought")
+    elif rsi > 65:
+        score -= 1
+        reasons.append("RSI overbought")
 
+    # MACD - hanya strong confirmation
     macd = indicators["macd"]
-    if macd["macd"] > macd["signal"]: score += 2; reasons.append("MACD bullish crossover")
-    else: score -= 2; reasons.append("MACD bearish crossover")
-    if macd["histogram"] > 0: score += 1
-    else: score -= 1
+    if macd["macd"] > macd["signal"] and macd["histogram"] > 0:
+        score += 2
+        reasons.append("MACD bullish crossover + positive histogram")
+    elif macd["macd"] < macd["signal"] and macd["histogram"] < 0:
+        score -= 2
+        reasons.append("MACD bearish crossover + negative histogram")
 
-    ema20, ema50, ema200 = indicators["ema20"], indicators["ema50"], indicators["ema200"]
-    if ema20 > ema50: score += 2; reasons.append("EMA20 > EMA50 (uptrend)")
-    else: score -= 2; reasons.append("EMA20 < EMA50 (downtrend)")
-    if ema50 > ema200: score += 1; reasons.append("EMA50 > EMA200 (bull market)")
-    else: score -= 1
-
+    # Bollinger Bands - extreme conditions only
     bb = indicators["bb"]
-    if price <= bb["lower"]: score += 3; reasons.append("Harga di bawah BB lower")
-    elif price >= bb["upper"]: score -= 3; reasons.append("Harga di atas BB upper")
-    if bb["width"] < 5: score += 1; reasons.append("BB squeeze")
+    if price <= bb["lower"] and rsi < 35:  # BOTH kondisi harus TRUE
+        score += 3
+        reasons.append("Price at BB lower + RSI oversold")
+    elif price >= bb["upper"] and rsi > 65:
+        score -= 3
+        reasons.append("Price at BB upper + RSI overbought")
 
+    # StochRSI - strong oversold/overbought
     stoch = indicators["stochRSI"]
-    if stoch["k"] < 20: score += 2; reasons.append("StochRSI oversold")
-    elif stoch["k"] > 80: score -= 2; reasons.append("StochRSI overbought")
+    if stoch["k"] < 15 and stoch["d"] < 15:
+        score += 2
+        reasons.append("StochRSI extremely oversold")
+    elif stoch["k"] > 85 and stoch["d"] > 85:
+        score -= 2
+        reasons.append("StochRSI extremely overbought")
 
-    if price > indicators["vwap"]: score += 1; reasons.append("Harga di atas VWAP")
-    else: score -= 1; reasons.append("Harga di bawah VWAP")
+    # VWAP - hanya counted jika strong
+    if price > indicators["vwap"] * 1.002:  # Must be 0.2% above
+        score += 1
+        reasons.append("Price above VWAP")
+    elif price < indicators["vwap"] * 0.998:
+        score -= 1
+        reasons.append("Price below VWAP")
 
-    if funding_rate < -0.01: score += 2; reasons.append("Funding rate negatif")
-    elif funding_rate > 0.05: score -= 2; reasons.append("Funding rate overlevered")
+    # Funding Rate - lebih ketat
+    if funding_rate < -0.05:
+        score += 2
+        reasons.append("Funding rate very negative (good for long)")
+    elif funding_rate > 0.08:
+        score -= 2
+        reasons.append("Funding rate too high (risky)")
 
-    if score >= 7: signal, strength, conf = "STRONG LONG", "strong", min(95, 60 + score * 3)
-    elif score >= 4: signal, strength, conf = "LONG", "long", min(85, 50 + score * 4)
-    elif score >= 1: signal, strength, conf = "WEAK LONG", "weaklong", min(65, 40 + score * 5)
-    elif score <= -7: signal, strength, conf = "STRONG SHORT", "strong-short", min(95, 60 + abs(score) * 3)
-    elif score <= -4: signal, strength, conf = "SHORT", "short", min(85, 50 + abs(score) * 4)
-    elif score <= -1: signal, strength, conf = "WEAK SHORT", "weakshort", min(65, 40 + abs(score) * 5)
-    else: signal, strength, conf = "NETRAL", "neutral", 50
+    # STRICTER SIGNAL THRESHOLD - raised dari 1 ke 6
+    if score >= 11: signal, strength, conf = "STRONG LONG", "strong", 95
+    elif score >= 8: signal, strength, conf = "LONG", "long", 80
+    elif score >= 6: signal, strength, conf = "WEAK LONG", "weaklong", 60
+    elif score <= -11: signal, strength, conf = "STRONG SHORT", "strong-short", 95
+    elif score <= -8: signal, strength, conf = "SHORT", "short", 80
+    elif score <= -6: signal, strength, conf = "WEAK SHORT", "weakshort", 60
+    else: signal, strength, conf = "NETRAL", "neutral", 0
 
     atr = indicators["atr"]
     is_long = score > 0
     entry = price
-    tp1 = price + atr * 1.5 if is_long else price - atr * 1.5
-    tp2 = price + atr * 3 if is_long else price - atr * 3
-    tp3 = price + atr * 5 if is_long else price - atr * 5
-    sl = price - atr if is_long else price + atr
+    
+    # Adaptive TP/SL based on volatility
+    atr_factor = 2 if atr > indicators["bb"]["width"] * 0.5 else 2.5
+    
+    tp1 = price + atr * 1.5 * atr_factor if is_long else price - atr * 1.5 * atr_factor
+    tp2 = price + atr * 2.5 * atr_factor if is_long else price - atr * 2.5 * atr_factor
+    tp3 = price + atr * 4 * atr_factor if is_long else price - atr * 4 * atr_factor
+    sl = price - atr * 1.2 if is_long else price + atr * 1.2
     rr = abs(tp2 - entry) / abs(sl - entry) if sl != entry else 0
 
     return {
@@ -183,7 +325,8 @@ def generate_signal(indicators: dict, price: float, funding_rate: float):
         "strength": strength,
         "score": score,
         "confidence": round(conf, 1),
-        "reasons": reasons[:5],
+        "filters_passed": filters_passed if df is not None else "N/A",
+        "reasons": reasons[:7],
         "levels": {
             "entry": round(entry, 4),
             "tp1": round(tp1, 4),
@@ -226,7 +369,7 @@ def analyze_pair(symbol: str, interval: str = "1h"):
         "vwap": calc_vwap(df.tail(24)),
     }
 
-    signal_data = generate_signal(indicators, price, funding_rate)
+    signal_data = generate_signal(indicators, price, funding_rate, df)
 
     return {
         "symbol": symbol,
@@ -262,7 +405,12 @@ def analyze(symbol: str, interval: str = "1h"):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/scanner")
-def scanner(interval: str = "1h", min_score: int = 0):
+def scanner(interval: str = "1h", min_score: int = 6, min_confidence: int = 60):
+    """
+    Scanner dengan filter ketat untuk mengurangi false signals:
+    - min_score: default 6 (signal harus WEAK LONG/SHORT minimal)
+    - min_confidence: default 60% (signal harus valid)
+    """
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(analyze_pair, sym, interval): sym for sym in WATCHLIST}
@@ -280,13 +428,18 @@ def scanner(interval: str = "1h", min_score: int = 0):
                     "strength": sig["strength"],
                     "score": sig["score"],
                     "confidence": sig["confidence"],
+                    "filters_passed": sig["filters_passed"],
                     "reasons": sig["reasons"],
                     "levels": sig["levels"],
                 })
             except:
                 pass
 
-    results = [r for r in results if abs(r["score"]) >= min_score]
+    # Filter ketat: hanya signal dengan confidence tinggi dan score memenuhi threshold
+    results = [
+        r for r in results 
+        if abs(r["score"]) >= min_score and r["confidence"] >= min_confidence
+    ]
     results.sort(key=lambda x: abs(x["score"]), reverse=True)
     return {"count": len(results), "data": results}
 
