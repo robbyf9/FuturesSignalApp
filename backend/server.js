@@ -1,6 +1,12 @@
 /**
- * Binance Futures Signal Scanner - Backend Server
- * Adds configurable exchange endpoints and clearer network diagnostics.
+ * Binance Futures Scalping Bot - Backend Server
+ * 
+ * Tujuan: Auto-scalping bot dengan timeframe 5m, TP/SL ketat, trailing SL agresif.
+ * Dipakai oleh: Frontend dashboard, Telegram bot, cron scheduler.
+ * Dependensi: express, axios, ws, node-cron, crypto (Binance Futures API).
+ * Fungsi utama: runBackgroundScanner, executeBinanceTrade, checkTradeLevels, 
+ *              moveStopLossToBreakEven, closePartialPosition, monitorActiveTrades.
+ * Side effects: REST API calls ke Binance, WebSocket stream, file I/O (trades/history/settings).
  */
 
 const express = require('express');
@@ -1321,29 +1327,35 @@ function detectSupportResistance(klines, period = 20) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 🎲 OPTIMAL TP/SL WITH GUARANTEED R:R 1:2
+// 🎲 SCALPING TP/SL — KETAT, CEPAT, MAX PROFIT
+// Mode scalp: SL 1x ATR, TP1 0.8x, TP2 1.5x, TP3 2.2x (R:R ~1:1.5)
+// Mode swing: SL 1.5x ATR, TP1 1.2x, TP2 2.0x, TP3 3.0x (R:R ~1:2)
 // ─────────────────────────────────────────────────────────────────────
-function calculateOptimalTPSL(entry, atr, trend, support, resistance) {
+function calculateOptimalTPSL(entry, atr, trend, support, resistance, isScalpMode = false) {
   const isLong = trend === 'long' || trend === 'bullish';
 
+  // Scalping: SL ketat 1x ATR, target dekat tapi frequent
+  // Swing:    SL lebar 1.5x ATR, target jauh tapi jarang
+  const slMultiplier = isScalpMode ? 1.0 : 1.5;
+  const tp1Mult = isScalpMode ? 0.8 : 1.2;
+  const tp2Mult = isScalpMode ? 1.5 : 2.0;
+  const tp3Mult = isScalpMode ? 2.2 : 3.0;
+  const rrRatio = isScalpMode ? 1.5 : 2.0;
+
   if (isLong) {
-    // Long: SL below support, TP at 2x risk
-    const sl = Math.max(support, entry - atr * 1.5);
+    const sl = Math.max(support, entry - atr * slMultiplier);
     const riskDistance = entry - sl;
-    const tp1 = entry + riskDistance * 1.2; // 1.2:1
-    const tp2 = entry + riskDistance * 2.0; // 2:1 (guaranteed minimum)
-    const tp3 = entry + riskDistance * 3.0; // 3:1
-
-    return { tp1, tp2, tp3, sl, rr: 2.0 };
+    const tp1 = entry + riskDistance * tp1Mult;
+    const tp2 = entry + riskDistance * tp2Mult;
+    const tp3 = entry + riskDistance * tp3Mult;
+    return { tp1, tp2, tp3, sl, rr: rrRatio };
   } else {
-    // Short: SL above resistance, TP at 2x risk
-    const sl = Math.min(resistance, entry + atr * 1.5);
+    const sl = Math.min(resistance, entry + atr * slMultiplier);
     const riskDistance = sl - entry;
-    const tp1 = entry - riskDistance * 1.2;
-    const tp2 = entry - riskDistance * 2.0; // 2:1 (guaranteed minimum)
-    const tp3 = entry - riskDistance * 3.0; // 3:1
-
-    return { tp1, tp2, tp3, sl, rr: 2.0 };
+    const tp1 = entry - riskDistance * tp1Mult;
+    const tp2 = entry - riskDistance * tp2Mult;
+    const tp3 = entry - riskDistance * tp3Mult;
+    return { tp1, tp2, tp3, sl, rr: rrRatio };
   }
 }
 
@@ -1585,16 +1597,17 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     score -= 1;
   }
 
-  // --- 🔥 HTF TREND ALIGNMENT PENALTY ---
+  // --- 🔥 HTF TREND ALIGNMENT PENALTY (Reduced for Scalping) ---
   let htfConflict = false;
+  const htfPenalty = isScalp ? 3 : 10; // Scalping: penalty kecil, tetap bisa lawan HTF
   if (htfTrend === 'BEARISH' && score > 0) {
-    score -= 10;
+    score -= htfPenalty;
     htfConflict = true;
-    reasons.push('HTF Trend Conflict (4h Bearish)');
+    reasons.push(`HTF Trend Conflict (4h Bearish, -${htfPenalty})`);
   } else if (htfTrend === 'BULLISH' && score < 0) {
-    score += 10;
+    score += htfPenalty;
     htfConflict = true;
-    reasons.push('HTF Trend Conflict (4h Bullish)');
+    reasons.push(`HTF Trend Conflict (4h Bullish, +${htfPenalty})`);
   }
 
   let signal = 'NETRAL';
@@ -1632,21 +1645,22 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     confidence = Math.min(confidence, 75);
   }
 
-  // Hard Cap confidence if HTF conflict exists to prevent auto-trade
+  // Hard Cap confidence if HTF conflict exists — relaxed in scalp mode
   if (htfConflict) {
-    confidence = Math.min(confidence, 60);
+    confidence = Math.min(confidence, isScalp ? 78 : 60);
   }
 
   const isLong = score >= 0;
   const entry = price;
   
-  // 🎯 OPTIMAL TP/SL WITH GUARANTEED R:R 1:2+ (PRIORITY FOR 75% WR)
+  // 🎯 SCALPING TP/SL — KETAT UNTUK MAX PROFIT (otomatis detect mode via interval)
   const tpslLevels = calculateOptimalTPSL(
     entry,
     atr,
     isLong ? 'long' : 'short',
     srLevels.support || entry * 0.95,
-    srLevels.resistance || entry * 1.05
+    srLevels.resistance || entry * 1.05,
+    isScalp
   );
   
   let tp1 = tpslLevels.tp1;
@@ -2122,31 +2136,40 @@ async function runBackgroundScanner() {
           if ((!existing || existing.type !== currentType) && !hasRealPosition) {
             // 🔥 SPEED OPTIMIZATION: Check confidence and execute trade BEFORE Telegram (saves 1-2s)
             
-            // STRICT THRESHOLD FOR ALTCOINS (Non-Core)
-            const requiredConf = isCore ? autoTradeMinConf : Math.max(85, autoTradeMinConf + 5);
-            const requiredScore = isCore ? minScore : Math.max(10, minScore + 1);
+            // SCALPING MODE: Threshold lebih rendah untuk entry lebih sering
+            const isScalpMode = interval === '5m' || interval === '1m';
+            const requiredConf = isScalpMode 
+              ? (isCore ? 70 : 75)   // Scalp: lebih agresif
+              : (isCore ? autoTradeMinConf : Math.max(85, autoTradeMinConf + 5));
+            const requiredScore = isScalpMode
+              ? (isCore ? 5 : 7)     // Scalp: score lebih rendah OK
+              : (isCore ? minScore : Math.max(10, minScore + 1));
             
             const meetsConfidence = item.signal.confidence >= requiredConf;
             const meetsScore = Math.abs(item.signal.score) >= requiredScore;
-            const trendAligned = (item.signal.htfTrend === 'BULLISH' && currentType === 'LONG') || 
-                                 (item.signal.htfTrend === 'BEARISH' && currentType === 'SHORT');
+            // Scalping: Tidak wajib HTF aligned (karena scalp melawan HTF itu normal)
+            const trendAligned = isScalpMode ? true : 
+                                 ((item.signal.htfTrend === 'BULLISH' && currentType === 'LONG') || 
+                                  (item.signal.htfTrend === 'BEARISH' && currentType === 'SHORT'));
 
             if (process.env.TRADING_ENABLED === 'true' && currentOpenPositions < maxOpen) {
               if (meetsConfidence && meetsScore && trendAligned) {
-                // ✅ PHASE 2: Multi-Timeframe Confirmation (65-70% target)
-                const mtfConfirm = await confirmMultiTimeframe(item.symbol, currentType);
+                // Scalping: Skip slow MTF confirmation, langsung execute
+                let canExecute = true;
                 
-                // ✅ PHASE 2: Correlation Filter Check
-                const corrCheck = checkCorrelationConflict(item.symbol, activeTrades);
-                
-                // ✅ PHASE 3: Pattern-based validation
-                const hasStrongPattern = item.signal.reasons?.some(r => r.includes('📦') || r.includes('📈') || r.includes('📉'));
-                
-                // LOGIC: Relaxed execution if score is very high (>= 9 for Core, >= 11 for Alts)
-                const isVeryStrong = isCore ? Math.abs(item.signal.score) >= 9 : Math.abs(item.signal.score) >= 11;
-                const canExecute = (mtfConfirm.consensus === 'STRONG' || (isVeryStrong && mtfConfirm.consensus === 'WEAK')) && 
-                                   !corrCheck.conflict && 
-                                   (!item.signal.reasons?.some(r => r.includes('⚠️')));
+                if (!isScalpMode) {
+                  // Swing mode: tetap pakai MTF confirmation
+                  const mtfConfirm = await confirmMultiTimeframe(item.symbol, currentType);
+                  const corrCheck = checkCorrelationConflict(item.symbol, activeTrades);
+                  const isVeryStrong = isCore ? Math.abs(item.signal.score) >= 9 : Math.abs(item.signal.score) >= 11;
+                  canExecute = (mtfConfirm.consensus === 'STRONG' || (isVeryStrong && mtfConfirm.consensus === 'WEAK')) && 
+                               !corrCheck.conflict && 
+                               (!item.signal.reasons?.some(r => r.includes('⚠️')));
+                } else {
+                  // Scalping mode: cek korelasi saja, skip MTF (terlalu lambat)
+                  const corrCheck = checkCorrelationConflict(item.symbol, activeTrades);
+                  canExecute = !corrCheck.conflict;
+                }
 
                 if (canExecute) {
                   // EXECUTE TRADE IMMEDIATELY (FAST PATH)
@@ -2263,7 +2286,39 @@ function initBinanceWebSocket() {
 }
 
 /**
+ * Menutup sebagian posisi (Partial Close) via Binance Market Order.
+ * Dipanggil oleh: checkTradeLevels() saat TP1 hit.
+ * Dependensi: tradingApi (Binance signed), signRequest.
+ * Side effects: Market order (reduce-only) di Binance.
+ */
+async function closePartialPosition(symbol, quantity, tradeType) {
+  if (!quantity || parseFloat(quantity) <= 0) {
+    console.error(`[trade] Partial close ${symbol}: quantity invalid (${quantity})`);
+    return false;
+  }
+  try {
+    const side = tradeType === 'LONG' ? 'SELL' : 'BUY';
+    const orderParams = signRequest({
+      symbol,
+      side,
+      type: 'MARKET',
+      quantity,
+      reduceOnly: 'true'
+    });
+    const res = await tradingApi.post('/fapi/v1/order', orderParams);
+    console.log(`[trade] Partial close OK: ${symbol} ${quantity} (${side}) | OrderID: ${res.data.orderId}`);
+    return true;
+  } catch (err) {
+    console.error(`[trade] Partial close GAGAL ${symbol}:`, err.response?.data?.msg || err.message);
+    return false;
+  }
+}
+
+/**
  * Logika pengecekan TP/SL untuk satu koin (Sekali Terdeteksi Langsung Beraksi)
+ * Dipanggil oleh: WebSocket on('message'), monitorActiveTrades() (fallback polling).
+ * Dependensi: moveStopLossToBreakEven, closePartialPosition, sendTelegramMessage.
+ * Side effects: Modify activeTrades in-memory, panggil Binance API untuk SL+/partial close.
  */
 async function checkTradeLevels(sym, currentPrice, livePrices) {
   const activeTrades = loadActiveTrades();
@@ -2324,11 +2379,11 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
         
         await sendTelegramMessage(`✅ *TARGET TP2 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
         
-        const settings = loadSettings();
-        const step = settings.fixed_tp_usdt;
-        if (step <= 0 && process.env.TRADING_ENABLED === 'true') {
+        // SL+ Level 2: SELALU aktif saat TP2 hit — geser SL ke level TP1
+        if (process.env.TRADING_ENABLED === 'true') {
            const tp1Price = trade.tp1;
-           const finalBePrice = parseFloat((trade.type === 'LONG' ? tp1Price / 1.001 : tp1Price / 0.999).toFixed(trade.precision?.price || 2));
+           // SL sedikit di bawah TP1 agar tidak langsung ke-trigger (buffer 0.05%)
+           const finalBePrice = parseFloat((trade.type === 'LONG' ? tp1Price * 0.9995 : tp1Price * 1.0005).toFixed(trade.precision?.price || 4));
            
            const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, finalBePrice);
            if (beSuccess) {
@@ -2376,29 +2431,33 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
     }
   }
 
-  // --- 🔥 HYBRID TRAILING SL ($ OFFSET) Logic ---
-  const settings = loadSettings();
-  const step = settings.fixed_tp_usdt; // Jarak/Buffer (0.5 USDT)
-  
-  if (step > 0 && process.env.TRADING_ENABLED === 'true') {
-      const margin = trade.margin || parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
-      const leverage = trade.leverage || parseInt(process.env.DEFAULT_LEVERAGE) || 10;
+  // --- 🔥 AGGRESSIVE SCALPING TRAILING SL ---
+  // BE trigger: profit >= $0.3 → kunci ke entry
+  // Trailing: profit >= $0.5 → trailing offset $0.2 (geser setiap naik $0.2)
+  if (process.env.TRADING_ENABLED === 'true') {
+      const margin = trade.margin || parseFloat(process.env.TRADE_QUANTITY_USDT) || 10;
+      const leverage = trade.leverage || parseInt(process.env.DEFAULT_LEVERAGE) || 20;
       const posValue = margin * leverage;
       
       const pnlUsdt = isLong 
         ? ((currentPrice - trade.entry) / trade.entry) * posValue 
         : ((trade.entry - currentPrice) / trade.entry) * posValue;
       
+      // Scalping params: BE trigger ketat, trailing offset kecil
+      const beTrigger = 0.30;    // Kunci BE saat profit $0.30
+      const trailStart = 0.50;   // Mulai trailing saat profit $0.50
+      const trailOffset = 0.20;  // Jarak trailing $0.20 di bawah profit running
+      
       let newSlPriceRaw = null;
 
-      // KONDISI A: Profit mencapai min 1 step ($0.5), kunci ke BE (Entry)
-      if (pnlUsdt >= step && pnlUsdt < (step * 2)) {
-          const bePrice = isLong ? trade.entry * 1.001 : trade.entry * 0.999;
+      // KONDISI A: Profit >= $0.30 tapi < $0.50 → kunci ke Break-Even (entry + fee buffer)
+      if (pnlUsdt >= beTrigger && pnlUsdt < trailStart) {
+          const bePrice = isLong ? trade.entry * 1.0005 : trade.entry * 0.9995;
           newSlPriceRaw = bePrice;
       } 
-      // KONDISI B: Profit mencapai min 2 step ($1.0), aktifkan Trailing Offset ($0.5)
-      else if (pnlUsdt >= (step * 2)) {
-          const targetProfitUsdt = pnlUsdt - step; // Selalu berjarak 0.5 USDT di bawah harga running
+      // KONDISI B: Profit >= $0.50 → Trailing Offset ($0.20 di bawah harga running)
+      else if (pnlUsdt >= trailStart) {
+          const targetProfitUsdt = pnlUsdt - trailOffset;
           const priceDiff = (targetProfitUsdt / posValue) * trade.entry;
           newSlPriceRaw = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
       }
@@ -2410,17 +2469,22 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
           const currentSl = trade.sl || (isLong ? 0 : 999999);
           const isBetter = isLong ? (newSlPrice > currentSl) : (newSlPrice < currentSl);
 
-          // Berikan toleransi perubahan minimal agar tidak terlalu sering hit API (misalnya selisih minimal 0.05 USDT profit)
+          // Toleransi minimal $0.03 agar tidak terlalu sering hit API
           const profitDiff = Math.abs(newSlPrice - currentSl) * (posValue / trade.entry);
           
-          if (isBetter && profitDiff > 0.05) {
-              console.log(`[trailing-sl] ${sym} PnL=$${pnlUsdt.toFixed(2)} | Menggeser SL ke $${newSlPrice} (Lock Profit: ~$${(pnlUsdt - step).toFixed(2)})`);
+          if (isBetter && profitDiff > 0.03) {
+              const lockedProfit = Math.max(0, pnlUsdt - trailOffset).toFixed(2);
+              console.log(`[trailing-sl] ${sym} PnL=$${pnlUsdt.toFixed(2)} | SL → $${newSlPrice} (Lock: ~$${lockedProfit})`);
               
               const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, newSlPrice);
               if (beSuccess) {
                   trade.sl = newSlPrice;
                   changed = true;
-                  await sendTelegramMessage(`🛡️ *TRAILING SL UP: ${sym}* 🛡️\n\nProfit: $${pnlUsdt.toFixed(2)}\nSL Baru: $${newSlPrice}\nEstimasi Profit Terkunci: $${(pnlUsdt - step).toFixed(2)}`);
+                  // Notif Telegram hanya saat pertama kali BE aktif atau profit signifikan
+                  if (!trade._beNotified || pnlUsdt >= 1.0) {
+                    trade._beNotified = true;
+                    await sendTelegramMessage(`🛡️ *TRAILING SL: ${sym}* 🛡️\n\nProfit: $${pnlUsdt.toFixed(2)}\nSL Baru: $${newSlPrice}\nProfit Terkunci: ~$${lockedProfit}`);
+                  }
               }
           }
       }
