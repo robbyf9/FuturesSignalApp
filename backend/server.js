@@ -83,6 +83,9 @@ let lastNotified = {}; // Tracker anti-spam notifikasi (symbol_type -> timestamp
 const recentlyClosed = new Map(); // Cache anti-duplicate (symbol -> timestamp)
 const leverageCache = new Map(); // Global Cache for leverage settings
 let currentOpenPositions = 0; // Global tracker for open positions
+let consecutiveLosses = 0; // PRO: Consecutive loss tracker (reset on win)
+let cachedBalance = null; // PRO: Cached account balance
+let lastBalanceFetch = 0; // PRO: Last balance fetch timestamp
 
 function rotateBaseUrl() {
   if (BINANCE_BASE_URLS.length <= 1) return false;
@@ -568,12 +571,47 @@ async function moveStopLossToBreakEven(symbol, entryPrice, side, manualPrice = n
   }
 }
 
+/**
+ * PRO: Fetch account balance (cached 60 detik)
+ */
+async function getAccountBalance() {
+  const now = Date.now();
+  if (cachedBalance !== null && (now - lastBalanceFetch < 60000)) {
+    return cachedBalance;
+  }
+  try {
+    const account = await fetchSigned('GET', '/fapi/v2/account');
+    const usdtAsset = account.assets.find(a => a.asset === 'USDT');
+    cachedBalance = usdtAsset ? parseFloat(usdtAsset.availableBalance) : 0;
+    lastBalanceFetch = now;
+    return cachedBalance;
+  } catch (err) {
+    console.error('[balance] Gagal ambil balance:', err.message);
+    return cachedBalance || parseFloat(process.env.TRADE_QUANTITY_USDT) * 10; // Fallback
+  }
+}
+
+/**
+ * PRO: Session Filter — Cek apakah saat ini session yang layak trading
+ * Skip Asian low-vol (UTC 21:00-01:00) kecuali BTC/ETH
+ */
+function isGoodTradingSession(symbol) {
+  const utcHour = new Date().getUTCHours();
+  // Major pairs (BTC/ETH) boleh trading 24/7
+  const majorPairs = new Set(['BTCUSDT', 'ETHUSDT', 'BNBUSDT']);
+  if (majorPairs.has(symbol)) return true;
+  // Altcoins: skip dead zone (UTC 21-01 = low liquidity Asia late night)
+  if (utcHour >= 21 || utcHour < 1) {
+    return false;
+  }
+  return true;
+}
+
 async function executeBinanceTrade(signalData, netPnL = null) {
   if (process.env.TRADING_ENABLED !== 'true' || !BINANCE_API_KEY || !BINANCE_SECRET_KEY) {
     return false;
   }
 
-  // Cek Target PnL Harian (Termasuk Floating)
   const settings = loadSettings();
   const currentNetPnL = netPnL !== null ? netPnL : await getNetDailyPnL();
   
@@ -587,32 +625,80 @@ async function executeBinanceTrade(signalData, netPnL = null) {
     return false;
   }
 
+  // PRO #2: Consecutive Loss Protection — pause setelah N loss berturut
+  const maxConsecLoss = settings.max_consecutive_losses || 3;
+  if (consecutiveLosses >= maxConsecLoss) {
+    console.log(`[risk] ⛔ SKIP ${signalData.symbol}: ${consecutiveLosses} consecutive losses (max: ${maxConsecLoss}). Bot pause 30 menit.`);
+    await sendTelegramMessage(`⛔ *BOT AUTO-PAUSE* ⛔\n\n${consecutiveLosses} loss berturut-turut terdeteksi.\nBot berhenti trading selama 30 menit untuk mencegah tilt.\n\n_Reset otomatis setelah win atau 30 menit._`);
+    // Auto-reset setelah 30 menit
+    setTimeout(() => {
+      if (consecutiveLosses >= maxConsecLoss) {
+        consecutiveLosses = Math.max(0, maxConsecLoss - 1); // Reduce by 1, bukan full reset
+        console.log(`[risk] Auto-resume: consecutiveLosses dikurangi ke ${consecutiveLosses}`);
+      }
+    }, 30 * 60 * 1000);
+    return false;
+  }
+
   const { symbol, signal, price } = signalData;
 
-  // Simbol TradFi-Perps (Commodity / Logam) memerlukan persetujuan khusus di Binance.
-  // Scanner boleh tampilkan sinyalnya, tapi auto-trade di-skip dengan notif yang jelas.
-  const TRADFI_SYMBOLS = new Set([
-    'XAUUSDT', 'XAGUSDT', 'XPTUSDТ', 'WBETHUSDT',
-    // Tambahkan simbol lain jika perlu
-  ]);
+  // PRO #4: Session Filter — Skip low liquidity hours untuk altcoins
+  if (!isGoodTradingSession(symbol)) {
+    console.log(`[session] Skip ${symbol}: Low-liquidity session (UTC ${new Date().getUTCHours()}:00)`);
+    return false;
+  }
+
+  const TRADFI_SYMBOLS = new Set(['XAUUSDT', 'XAGUSDT', 'XPTUSDТ', 'WBETHUSDT']);
   if (TRADFI_SYMBOLS.has(symbol)) {
-    console.log(`[trade] Skip auto-trade ${symbol}: Simbol TradFi-Perps, perlu sign agreement di Binance terlebih dahulu.`);
+    console.log(`[trade] Skip auto-trade ${symbol}: Simbol TradFi-Perps.`);
     return false;
   }
 
   const side = signal.signal.includes('LONG') ? 'BUY' : 'SELL';
   const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
-  
-  const usdtAmount = parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
-  const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 10;
-
-  console.log(`[trade] Mengeksekusi order ${symbol} (${side}) senilai ${usdtAmount} USDT...`);
+  const leverage = parseInt(process.env.DEFAULT_LEVERAGE) || 20;
 
   try {
     const info = await getExchangeInfo();
     const precision = getSymbolPrecision(symbol, info);
     
-    // 1. Set Leverage (Only if changed to save ~300ms)
+    // PRO #1: Dynamic Position Sizing — Risk % dari balance, bukan flat amount
+    const balance = await getAccountBalance();
+    const riskPct = settings.risk_per_trade_pct || 1.5; // Default 1.5% akun per trade
+    const riskAmount = balance * (riskPct / 100); // Jumlah USDT yang boleh hilang
+    
+    // Hitung SL distance untuk position sizing
+    const slDistance = Math.abs(signal.levels.entry - signal.levels.sl);
+    const slPct = (slDistance / signal.levels.entry) * 100;
+    
+    // Position size = riskAmount / slPct * 100 / leverage → margin yang dibutuhkan
+    let usdtAmount;
+    if (slPct > 0 && slDistance > 0) {
+      // Qty in coins = riskAmount / slDistance
+      // Margin = (qty * entry) / leverage
+      const qtyFromRisk = riskAmount / slDistance;
+      usdtAmount = Math.min(
+        (qtyFromRisk * signal.levels.entry) / leverage,
+        balance * 0.15 // Hard cap: max 15% balance per trade
+      );
+    } else {
+      usdtAmount = parseFloat(process.env.TRADE_QUANTITY_USDT) || 10;
+    }
+    
+    // PRO #2: Reduce size after consecutive losses
+    if (consecutiveLosses > 0) {
+      const sizeReduction = Math.pow(0.7, consecutiveLosses); // 70% per loss (1L=70%, 2L=49%)
+      const originalAmount = usdtAmount;
+      usdtAmount = usdtAmount * sizeReduction;
+      console.log(`[risk] Size reduced: $${originalAmount.toFixed(2)} → $${usdtAmount.toFixed(2)} (${consecutiveLosses} losses, ${(sizeReduction*100).toFixed(0)}%)`);
+    }
+    
+    // Minimum margin check
+    usdtAmount = Math.max(usdtAmount, 5); // Minimum $5
+    
+    console.log(`[trade] ${symbol} (${side}) | Balance: $${balance.toFixed(2)} | Risk: ${riskPct}% ($${riskAmount.toFixed(2)}) | Margin: $${usdtAmount.toFixed(2)} | SL: ${slPct.toFixed(2)}%`);
+
+    // 1. Set Leverage
     const currentLev = leverageCache.get(symbol);
     if (currentLev !== leverage) {
       const levParams = signRequest({ symbol, leverage });
@@ -620,20 +706,15 @@ async function executeBinanceTrade(signalData, netPnL = null) {
       leverageCache.set(symbol, leverage);
     }
 
-    // 2. ENTRY GUARD
+    // 2. Entry Guard (slippage protection)
     try {
-      // Optimization: Fast-Path entry skip redundant ticker fetch if scanner price is fresh
       const livePrice = signal.price || price;
       const signalEntry = parseFloat(signal.levels.entry);
-      
       const diff = Math.abs((livePrice - signalEntry) / signalEntry) * 100;
-      
-      if (diff > 0.5) { // Relax guard slightly to 0.5% for PnL optimization (don't miss trades)
-        console.log(`[entry-guard] SKIP ${symbol}: Harga sudah lari ${diff.toFixed(2)}% (Limit 0.5%)`);
-        sendTelegramMessage(`⚠️ *TRADE SKIPPED: ${symbol}* ⚠️\n\nHarga sudah terlalu jauh (${diff.toFixed(2)}%).`);
-        return;
+      if (diff > 0.3) { // PRO: Ketat 0.3% (bukan 0.5%) — kurangi slippage
+        console.log(`[entry-guard] SKIP ${symbol}: Harga lari ${diff.toFixed(2)}% (max 0.3%)`);
+        return false;
       }
-      // Gunakan harga live untuk perhitungan qty
       signal.levels.entry = livePrice;
     } catch (e) {
       console.error(`[entry-guard] Skip check due to error:`, e.message);
@@ -643,17 +724,32 @@ async function executeBinanceTrade(signalData, netPnL = null) {
     const qty = (usdtAmount * leverage) / signal.levels.entry;
     const formattedQty = qty.toFixed(precision.quantity);
     
-    // 4. Main Order (Market)
+    // PRO #3: LIMIT Order dengan slippage cap (bukan MARKET)
+    // Price = entry ± 0.05% buffer agar pasti fill, tapi capped
+    const limitBuffer = signal.levels.entry * 0.0005; // 0.05% buffer
+    const limitPrice = side === 'BUY' 
+      ? (signal.levels.entry + limitBuffer).toFixed(precision.price)
+      : (signal.levels.entry - limitBuffer).toFixed(precision.price);
+    
     const orderParams = signRequest({
       symbol,
       side,
-      type: 'MARKET',
-      quantity: formattedQty
+      type: 'LIMIT',
+      quantity: formattedQty,
+      price: limitPrice,
+      timeInForce: 'IOC' // Immediate-Or-Cancel: fill sekarang atau batal
     });
     
     const mainOrder = await tradingApi.post('/fapi/v1/order', orderParams);
-    const executedQty = parseFloat(mainOrder.data.origQty);
-    console.log(`[trade] Entry Berhasil! Order ID: ${mainOrder.data.orderId} | Qty: ${executedQty}`);
+    const executedQty = parseFloat(mainOrder.data.executedQty || mainOrder.data.origQty);
+    
+    // Cek apakah order ter-fill (IOC bisa partially fill atau cancel)
+    if (executedQty <= 0) {
+      console.log(`[trade] LIMIT IOC tidak ter-fill untuk ${symbol}. Skip.`);
+      return false;
+    }
+    
+    console.log(`[trade] Entry via LIMIT IOC! Order: ${mainOrder.data.orderId} | Filled: ${executedQty} | Price: ${limitPrice}`);
 
     // 🔥 SAFETY DELAY: Tunggu 500ms agar Binance Testnet sinkron sebelum pasang TP/SL
     await sleep(500);
@@ -1298,11 +1394,11 @@ function detectDivergence(closes, rsis, macds, prices) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 📍 SUPPORT & RESISTANCE DETECTION
+// 📍 SUPPORT & RESISTANCE + SWING HIGH/LOW DETECTION (PRO)
 // ─────────────────────────────────────────────────────────────────────
 function detectSupportResistance(klines, period = 20) {
   if (klines.length < period) {
-    return { support: 0, resistance: 0, isBreakout: false };
+    return { support: 0, resistance: 0, isBreakout: false, swingLow: 0, swingHigh: 0 };
   }
 
   const highs = klines.slice(-period).map(k => Number(k[2]));
@@ -1312,13 +1408,31 @@ function detectSupportResistance(klines, period = 20) {
   const resistance = Math.max(...highs);
   const support = Math.min(...lows);
 
-  // Check if price broke recent support or resistance
-  const isBreakoutResistance = currentPrice > resistance * 1.005; // 0.5% above
-  const isBreakoutSupport = currentPrice < support * 0.995;      // 0.5% below
+  // PRO: Detect actual swing high/low (pivot points) — last 10 candles
+  // Swing Low = candle whose low is lower than both neighbors
+  // Swing High = candle whose high is higher than both neighbors
+  let swingLow = support;
+  let swingHigh = resistance;
+  const lookback = Math.min(10, klines.length - 2);
+  for (let i = klines.length - lookback; i < klines.length - 1; i++) {
+    const h = Number(klines[i][2]);
+    const l = Number(klines[i][3]);
+    const prevH = Number(klines[i - 1][2]);
+    const prevL = Number(klines[i - 1][3]);
+    const nextH = Number(klines[i + 1][2]);
+    const nextL = Number(klines[i + 1][3]);
+    if (l < prevL && l < nextL) swingLow = Math.max(swingLow, l); // Nearest swing low
+    if (h > prevH && h > nextH) swingHigh = Math.min(swingHigh, h); // Nearest swing high
+  }
+
+  const isBreakoutResistance = currentPrice > resistance * 1.005;
+  const isBreakoutSupport = currentPrice < support * 0.995;
 
   return {
     support,
     resistance,
+    swingLow,
+    swingHigh,
     breakoutResistance: isBreakoutResistance,
     breakoutSupport: isBreakoutSupport,
     isNearSupport: currentPrice < support * 1.02,
@@ -1327,35 +1441,41 @@ function detectSupportResistance(klines, period = 20) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 🎲 SCALPING TP/SL — KETAT, CEPAT, MAX PROFIT
-// Mode scalp: SL 1x ATR, TP1 0.8x, TP2 1.5x, TP3 2.2x (R:R ~1:1.5)
-// Mode swing: SL 1.5x ATR, TP1 1.2x, TP2 2.0x, TP3 3.0x (R:R ~1:2)
+// 🎲 ADAPTIVE TP/SL — AUTO-DETECT MODE DARI INTERVAL
+// Hybrid 15m: SL 1.2x ATR, TP1 1.0x, TP2 1.8x, TP3 2.5x (R:R ~1:1.8)
+// Scalp 5m:   SL 1.0x ATR, TP1 0.8x, TP2 1.5x, TP3 2.2x (R:R ~1:1.5)
+// Swing 1h:   SL 1.5x ATR, TP1 1.2x, TP2 2.0x, TP3 3.0x (R:R ~1:2)
 // ─────────────────────────────────────────────────────────────────────
-function calculateOptimalTPSL(entry, atr, trend, support, resistance, isScalpMode = false) {
+function calculateOptimalTPSL(entry, atr, trend, support, resistance, mode = 'swing', swingLow = 0, swingHigh = 0) {
   const isLong = trend === 'long' || trend === 'bullish';
 
-  // Scalping: SL ketat 1x ATR, target dekat tapi frequent
-  // Swing:    SL lebar 1.5x ATR, target jauh tapi jarang
-  const slMultiplier = isScalpMode ? 1.0 : 1.5;
-  const tp1Mult = isScalpMode ? 0.8 : 1.2;
-  const tp2Mult = isScalpMode ? 1.5 : 2.0;
-  const tp3Mult = isScalpMode ? 2.2 : 3.0;
-  const rrRatio = isScalpMode ? 1.5 : 2.0;
+  // Adaptive multipliers per trading mode
+  const params = {
+    scalp:  { sl: 1.0, tp1: 0.8, tp2: 1.5, tp3: 2.2, rr: 1.5 },
+    hybrid: { sl: 1.2, tp1: 1.0, tp2: 1.8, tp3: 2.5, rr: 1.8 },
+    swing:  { sl: 1.5, tp1: 1.2, tp2: 2.0, tp3: 3.0, rr: 2.0 }
+  };
+  const p = params[mode] || params.hybrid;
 
   if (isLong) {
-    const sl = Math.max(support, entry - atr * slMultiplier);
-    const riskDistance = entry - sl;
-    const tp1 = entry + riskDistance * tp1Mult;
-    const tp2 = entry + riskDistance * tp2Mult;
-    const tp3 = entry + riskDistance * tp3Mult;
-    return { tp1, tp2, tp3, sl, rr: rrRatio };
+    // PRO: SL = pilih yg lebih protektif: ATR-based ATAU swing low (market structure)
+    const atrSl = entry - atr * p.sl;
+    const structureSl = swingLow > 0 ? swingLow * 0.998 : atrSl; // Sedikit di bawah swing low
+    const sl = Math.max(support, Math.max(atrSl, structureSl)); // Pilih yang paling dekat (tight)
+    const riskDistance = Math.max(entry - sl, atr * 0.3); // Minimum 0.3 ATR agar tidak terlalu ketat
+    const tp1 = entry + riskDistance * p.tp1;
+    const tp2 = entry + riskDistance * p.tp2;
+    const tp3 = entry + riskDistance * p.tp3;
+    return { tp1, tp2, tp3, sl, rr: p.rr };
   } else {
-    const sl = Math.min(resistance, entry + atr * slMultiplier);
-    const riskDistance = sl - entry;
-    const tp1 = entry - riskDistance * tp1Mult;
-    const tp2 = entry - riskDistance * tp2Mult;
-    const tp3 = entry - riskDistance * tp3Mult;
-    return { tp1, tp2, tp3, sl, rr: rrRatio };
+    const atrSl = entry + atr * p.sl;
+    const structureSl = swingHigh > 0 ? swingHigh * 1.002 : atrSl; // Sedikit di atas swing high
+    const sl = Math.min(resistance, Math.min(atrSl, structureSl)); // Pilih yang paling dekat (tight)
+    const riskDistance = Math.max(sl - entry, atr * 0.3);
+    const tp1 = entry - riskDistance * p.tp1;
+    const tp2 = entry - riskDistance * p.tp2;
+    const tp3 = entry - riskDistance * p.tp3;
+    return { tp1, tp2, tp3, sl, rr: p.rr };
   }
 }
 
@@ -1363,7 +1483,7 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
   let score = 0;
   const reasons = [];
   const { rsi, macd, ema20, ema50, ema9, ema21, bb, stochRSI, vwap, atr } = indicators;
-  const isScalp = interval === '1m' || interval === '5m';
+  const isScalp = interval === '1m' || interval === '5m' || interval === '15m';
 
   // ⭐ PHASE 3: PATTERN RECOGNITION BONUS
   if (pattern.pattern === 'CONSOLIDATION' && pattern.strength > 0) {
@@ -1653,14 +1773,18 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
   const isLong = score >= 0;
   const entry = price;
   
-  // 🎯 SCALPING TP/SL — KETAT UNTUK MAX PROFIT (otomatis detect mode via interval)
+  // 🎯 ADAPTIVE TP/SL — AUTO-DETECT MODE (15m=hybrid, 5m=scalp, 1h=swing)
+  const tpslMode = (interval === '1m' || interval === '5m') ? 'scalp' 
+                 : (interval === '15m') ? 'hybrid' : 'swing';
   const tpslLevels = calculateOptimalTPSL(
     entry,
     atr,
     isLong ? 'long' : 'short',
     srLevels.support || entry * 0.95,
     srLevels.resistance || entry * 1.05,
-    isScalp
+    tpslMode,
+    srLevels.swingLow || 0,
+    srLevels.swingHigh || 0
   );
   
   let tp1 = tpslLevels.tp1;
@@ -1865,7 +1989,9 @@ function loadSettings() {
   return { 
     daily_pnl_target: 10,
     daily_loss_limit: 50, // Default $50
-    fixed_tp_usdt: 0.5 // Default $0.5
+    fixed_tp_usdt: 0.5, // Default $0.5
+    risk_per_trade_pct: 1.5, // PRO: Risk 1.5% dari balance per trade
+    max_consecutive_losses: 3 // PRO: Pause setelah 3 loss berturut
   };
 }
 
@@ -1975,15 +2101,24 @@ function saveToHistory(trade, exitPrice = null, reason = 'UNKNOWN') {
   const margin = trade.margin || parseFloat(process.env.TRADE_QUANTITY_USDT) || 20;
   const leverage = trade.leverage || parseInt(process.env.DEFAULT_LEVERAGE) || 10;
   
-  // Set exit price jika diberikan
   const finalExit = exitPrice || trade.exit || trade.entry;
   
-  // Hitung profit nominal (USDT)
   const isLong = trade.type === 'LONG';
   const pnlPercent = isLong 
     ? ((finalExit - trade.entry) / trade.entry) * 100 
     : ((trade.entry - finalExit) / trade.entry) * 100;
   const pnlUsdt = (pnlPercent / 100) * (margin * leverage);
+
+  // PRO: Update consecutive loss tracker
+  if (pnlUsdt < 0) {
+    consecutiveLosses++;
+    console.log(`[risk] Consecutive losses: ${consecutiveLosses}`);
+  } else if (pnlUsdt > 0) {
+    if (consecutiveLosses > 0) {
+      console.log(`[risk] Win! Streak reset dari ${consecutiveLosses} losses.`);
+    }
+    consecutiveLosses = 0; // Reset on win
+  }
 
   const entry = {
     ...trade,
@@ -1994,12 +2129,10 @@ function saveToHistory(trade, exitPrice = null, reason = 'UNKNOWN') {
     closedAt: Date.now()
   };
 
-  // Anti-Duplicate: Catat koin ini baru saja ditutup (Cooldown 5 menit)
   recentlyClosed.set(trade.symbol, Date.now());
   setTimeout(() => recentlyClosed.delete(trade.symbol), 300000);
 
-  history.unshift(entry); // Masukkan ke paling depan
-  // Simpan maksimal 200 trade terakhir agar tidak bengkak filenya
+  history.unshift(entry);
   const trimmed = history.slice(0, 200);
   
   try {
@@ -2137,7 +2270,7 @@ async function runBackgroundScanner() {
             // 🔥 SPEED OPTIMIZATION: Check confidence and execute trade BEFORE Telegram (saves 1-2s)
             
             // SCALPING MODE: Threshold lebih rendah untuk entry lebih sering
-            const isScalpMode = interval === '5m' || interval === '1m';
+            const isScalpMode = interval === '5m' || interval === '1m' || interval === '15m';
             const requiredConf = isScalpMode 
               ? (isCore ? 70 : 75)   // Scalp: lebih agresif
               : (isCore ? autoTradeMinConf : Math.max(85, autoTradeMinConf + 5));
@@ -2444,9 +2577,9 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
         : ((trade.entry - currentPrice) / trade.entry) * posValue;
       
       // Scalping params: BE trigger ketat, trailing offset kecil
-      const beTrigger = 0.30;    // Kunci BE saat profit $0.30
-      const trailStart = 0.50;   // Mulai trailing saat profit $0.50
-      const trailOffset = 0.20;  // Jarak trailing $0.20 di bawah profit running
+      const beTrigger = 0.35;    // Kunci BE saat profit $0.35 (15m: sedikit lebih longgar)
+      const trailStart = 0.60;   // Mulai trailing saat profit $0.60
+      const trailOffset = 0.25;  // Jarak trailing $0.25 di bawah profit running
       
       let newSlPriceRaw = null;
 
