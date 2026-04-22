@@ -433,7 +433,7 @@ async function getBTCStatus() {
     };
   } catch (err) {
     console.error('[market-watch] Gagal ambil status BTC:', err.message);
-    return { isBullish: true, isPanic: false, priceChange15m: 0 }; // Default safe if API fails
+    return { isBullish: true, isPanic: false, priceChange15m: 0, price: 0 }; // Default safe if API fails
   }
 }
 
