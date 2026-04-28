@@ -1,40 +1,4 @@
 {
-  "TRUMPUSDT": {
-    "symbol": "TRUMPUSDT",
-    "type": "LONG",
-    "entry": 2.881,
-    "leverage": 20,
-    "margin": 0,
-    "initialQty": 4910.3,
-    "tp1": 2.90981,
-    "tp2": 2.93862,
-    "tp3": 2.96743,
-    "sl": 2.82338,
-    "isPartiallyClosed": false,
-    "hitTp1": false,
-    "hitTp2": false,
-    "last_pnl_step": 0,
-    "timestamp": 1776830460202,
-    "adopted": true
-  },
-  "DOTUSDT": {
-    "symbol": "DOTUSDT",
-    "type": "LONG",
-    "entry": 1.291,
-    "leverage": 20,
-    "margin": 0,
-    "initialQty": 10763.2,
-    "tp1": 1.30391,
-    "tp2": 1.3168199999999999,
-    "tp3": 1.3297299999999999,
-    "sl": 1.26518,
-    "isPartiallyClosed": false,
-    "hitTp1": false,
-    "hitTp2": false,
-    "last_pnl_step": 0,
-    "timestamp": 1776830460207,
-    "adopted": true
-  },
   "BNBUSDT": {
     "symbol": "BNBUSDT",
     "type": "LONG",
@@ -51,7 +15,8 @@
     "hitTp2": false,
     "last_pnl_step": 0,
     "timestamp": 1776830460210,
-    "adopted": true
+    "adopted": true,
+    "pendingClosure": true
   },
   "DOGEUSDT": {
     "symbol": "DOGEUSDT",
@@ -65,11 +30,12 @@
     "tp3": 0.09923019999999999,
     "sl": 0.09441319999999999,
     "isPartiallyClosed": false,
-    "hitTp1": false,
-    "hitTp2": false,
+    "hitTp1": true,
+    "hitTp2": true,
     "last_pnl_step": 0,
     "timestamp": 1776830460214,
-    "adopted": true
+    "adopted": true,
+    "pendingClosure": true
   },
   "XLMUSDT": {
     "symbol": "XLMUSDT",
@@ -87,25 +53,8 @@
     "hitTp2": false,
     "last_pnl_step": 0,
     "timestamp": 1776830460217,
-    "adopted": true
-  },
-  "XRPUSDT": {
-    "symbol": "XRPUSDT",
-    "type": "LONG",
-    "entry": 1.4428,
-    "leverage": 20,
-    "margin": 0,
-    "initialQty": 9809,
-    "tp1": 1.4572280000000002,
-    "tp2": 1.471656,
-    "tp3": 1.4860840000000002,
-    "sl": 1.413944,
-    "isPartiallyClosed": false,
-    "hitTp1": false,
-    "hitTp2": false,
-    "last_pnl_step": 0,
-    "timestamp": 1776830460220,
-    "adopted": true
+    "adopted": true,
+    "pendingClosure": true
   },
   "PAXGUSDT": {
     "symbol": "PAXGUSDT",
@@ -123,7 +72,8 @@
     "hitTp2": false,
     "last_pnl_step": 0,
     "timestamp": 1776830460224,
-    "adopted": true
+    "adopted": true,
+    "pendingClosure": true
   },
   "LINKUSDT": {
     "symbol": "LINKUSDT",
@@ -141,6 +91,7 @@
     "hitTp2": false,
     "last_pnl_step": 0,
     "timestamp": 1776830460231,
-    "adopted": true
+    "adopted": true,
+    "pendingClosure": true
   }
 }

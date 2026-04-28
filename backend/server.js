@@ -1,7 +1,7 @@
 /**
- * Binance Futures Scalping Bot - Backend Server
+ * Binance Futures Scalping Bot - Backend Server (v4.0 Win Rate Overhaul)
  * 
- * Tujuan: Auto-scalping bot dengan timeframe 5m, TP/SL ketat, trailing SL agresif.
+ * Tujuan: Auto-scalping bot 15m, Wilder RSI, positive R:R, candle-close confirm, pct trailing SL.
  * Dipakai oleh: Frontend dashboard, Telegram bot, cron scheduler.
  * Dependensi: express, axios, ws, node-cron, crypto (Binance Futures API).
  * Fungsi utama: runBackgroundScanner, executeBinanceTrade, checkTradeLevels, 
@@ -662,6 +662,23 @@ async function executeBinanceTrade(signalData, netPnL = null) {
     const info = await getExchangeInfo();
     const precision = getSymbolPrecision(symbol, info);
     
+    // FIX #8: Spread Filter — cek bid-ask spread sebelum entry
+    // Spread lebar = slippage tinggi = loss dari awal
+    try {
+      const orderbook = await safeGet('/fapi/v1/depth', { symbol, limit: 5 });
+      if (orderbook?.data?.bids?.length && orderbook?.data?.asks?.length) {
+        const bestBid = parseFloat(orderbook.data.bids[0][0]);
+        const bestAsk = parseFloat(orderbook.data.asks[0][0]);
+        const spreadPct = ((bestAsk - bestBid) / bestBid) * 100;
+        if (spreadPct > 0.1) {
+          console.log(`[trade] Skip ${symbol}: spread terlalu lebar (${spreadPct.toFixed(3)}% > 0.1%)`);
+          return false;
+        }
+      }
+    } catch (spreadErr) {
+      console.warn(`[trade] Spread check gagal untuk ${symbol}: ${spreadErr.message} (lanjut tanpa filter)`);
+    }
+    
     // PRO #1: Dynamic Position Sizing — Risk % dari balance, bukan flat amount
     const balance = await getAccountBalance();
     const riskPct = settings.risk_per_trade_pct || 1.5; // Default 1.5% akun per trade
@@ -885,20 +902,30 @@ api.interceptors.response.use(
 function calcRSI(closes, period = 14) {
   if (closes.length < period + 1) return 50;
 
-  let gains = 0;
-  let losses = 0;
-
-  for (let i = closes.length - period; i < closes.length; i += 1) {
+  // Wilder's Smoothed RSI (standar TradingView/MetaTrader)
+  // Step 1: Seed dengan SMA dari period pertama
+  let avgGain = 0;
+  let avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
     const delta = closes[i] - closes[i - 1];
-    if (delta > 0) gains += delta;
-    else losses += Math.abs(delta);
+    if (delta > 0) avgGain += delta;
+    else avgLoss += Math.abs(delta);
+  }
+  avgGain /= period;
+  avgLoss /= period;
+
+  // Step 2: Wilder's smoothing (EMA with alpha = 1/period)
+  for (let i = period + 1; i < closes.length; i++) {
+    const delta = closes[i] - closes[i - 1];
+    const gain = delta > 0 ? delta : 0;
+    const loss = delta < 0 ? Math.abs(delta) : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
   }
 
-  const avgGain = gains / period;
-  const avgLoss = losses / period;
   if (avgLoss === 0) return 100;
-
-  return parseFloat((100 - 100 / (1 + avgGain / avgLoss)).toFixed(2));
+  const rs = avgGain / avgLoss;
+  return parseFloat((100 - 100 / (1 + rs)).toFixed(2));
 }
 
 function calcEMA(closes, period) {
@@ -1353,43 +1380,56 @@ function calculateDynamicPositionSize(atr, balance, riskPercentage = 1.0, curren
 // 🎯 DIVERGENCE DETECTION (Highest Probability Setups)
 // ─────────────────────────────────────────────────────────────────────
 function detectDivergence(closes, rsis, macds, prices) {
-  if (closes.length < 5 || rsis.length < 5) {
+  if (closes.length < 10 || rsis.length < 10) {
     return { bullishDiv: false, bearishDiv: false, confidence: 0 };
   }
 
-  // Get last 5 valid candles
-  const last5Closes = closes.slice(-5);
-  const last5RSI = rsis.slice(-5);
-  const last5Prices = prices.slice(-5);
+  // Proper swing high/low detection (minimum 3-candle pivot)
+  // Cari 2 swing low terakhir untuk bullish div, 2 swing high untuk bearish div
+  const len = Math.min(prices.length, rsis.length);
+  const swingLows = [];
+  const swingHighs = [];
 
-  // Current swing lows/highs
-  const currentPrice = last5Prices[last5Prices.length - 1];
-  const currentRSI = last5RSI[last5RSI.length - 1];
-  
-  const prevPrice = last5Prices[last5Prices.length - 2];
-  const prevRSI = last5RSI[last5RSI.length - 2];
+  for (let i = 2; i < len - 1; i++) {
+    // Swing low: price[i] lower than both neighbors
+    if (prices[i] < prices[i - 1] && prices[i] < prices[i + 1] &&
+        prices[i] < prices[i - 2]) {
+      swingLows.push({ idx: i, price: prices[i], rsi: rsis[i] });
+    }
+    // Swing high: price[i] higher than both neighbors
+    if (prices[i] > prices[i - 1] && prices[i] > prices[i + 1] &&
+        prices[i] > prices[i - 2]) {
+      swingHighs.push({ idx: i, price: prices[i], rsi: rsis[i] });
+    }
+  }
 
   let bullishDiv = false, bearishDiv = false;
   let divStrength = 0;
 
-  // Hidden Bullish Divergence
-  // Price makes lower low, RSI makes higher low → Strong reversal signal
-  if (currentPrice < prevPrice && currentRSI > prevRSI && currentRSI < 50) {
-    bullishDiv = true;
-    divStrength = (currentRSI - prevRSI) * 2; // 0-100 scale
+  // Regular Bullish Divergence: price lower low + RSI higher low (di area oversold)
+  if (swingLows.length >= 2) {
+    const prev = swingLows[swingLows.length - 2];
+    const curr = swingLows[swingLows.length - 1];
+    if (curr.price < prev.price && curr.rsi > prev.rsi && curr.rsi < 45) {
+      bullishDiv = true;
+      divStrength = (curr.rsi - prev.rsi) * 1.5;
+    }
   }
 
-  // Regular Bearish Divergence
-  // Price makes higher high, RSI makes lower high → Strong reversal signal
-  if (currentPrice > prevPrice && currentRSI < prevRSI && currentRSI > 50) {
-    bearishDiv = true;
-    divStrength = (prevRSI - currentRSI) * 2;
+  // Regular Bearish Divergence: price higher high + RSI lower high (di area overbought)
+  if (swingHighs.length >= 2) {
+    const prev = swingHighs[swingHighs.length - 2];
+    const curr = swingHighs[swingHighs.length - 1];
+    if (curr.price > prev.price && curr.rsi < prev.rsi && curr.rsi > 55) {
+      bearishDiv = true;
+      divStrength = (prev.rsi - curr.rsi) * 1.5;
+    }
   }
 
   return {
     bullishDiv,
     bearishDiv,
-    confidence: Math.min(100, divStrength),
+    confidence: Math.min(100, Math.max(0, divStrength)),
   };
 }
 
@@ -1449,33 +1489,37 @@ function detectSupportResistance(klines, period = 20) {
 function calculateOptimalTPSL(entry, atr, trend, support, resistance, mode = 'swing', swingLow = 0, swingHigh = 0) {
   const isLong = trend === 'long' || trend === 'bullish';
 
-  // Adaptive multipliers per trading mode
+  // FIX: TP1 HARUS SELALU > SL distance agar setiap trade net positive
+  // Prinsip: SL ketat, TP jauh → positive expectancy
   const params = {
-    scalp:  { sl: 1.0, tp1: 0.8, tp2: 1.5, tp3: 2.2, rr: 1.5 },
-    hybrid: { sl: 1.2, tp1: 1.0, tp2: 1.8, tp3: 2.5, rr: 1.8 },
-    swing:  { sl: 1.5, tp1: 1.2, tp2: 2.0, tp3: 3.0, rr: 2.0 }
+    scalp:  { sl: 0.8, tp1: 1.0, tp2: 1.8, tp3: 2.5, rr: 1.25 },
+    hybrid: { sl: 1.0, tp1: 1.3, tp2: 2.2, tp3: 3.0, rr: 1.3 },
+    swing:  { sl: 1.2, tp1: 1.5, tp2: 2.5, tp3: 3.5, rr: 1.25 }
   };
   const p = params[mode] || params.hybrid;
 
   if (isLong) {
-    // PRO: SL = pilih yg lebih protektif: ATR-based ATAU swing low (market structure)
+    // SL: pilih yang paling protektif — ATR-based atau structure (swing low)
     const atrSl = entry - atr * p.sl;
-    const structureSl = swingLow > 0 ? swingLow * 0.998 : atrSl; // Sedikit di bawah swing low
-    const sl = Math.max(support, Math.max(atrSl, structureSl)); // Pilih yang paling dekat (tight)
-    const riskDistance = Math.max(entry - sl, atr * 0.3); // Minimum 0.3 ATR agar tidak terlalu ketat
+    const structureSl = swingLow > 0 ? swingLow * 0.997 : atrSl;
+    const sl = Math.max(support, Math.max(atrSl, structureSl));
+    const riskDistance = Math.max(entry - sl, atr * 0.4); // Min 0.4 ATR (sedikit lebih lebar)
+    // TP dihitung dari riskDistance → guaranteed R:R > 1
     const tp1 = entry + riskDistance * p.tp1;
     const tp2 = entry + riskDistance * p.tp2;
     const tp3 = entry + riskDistance * p.tp3;
-    return { tp1, tp2, tp3, sl, rr: p.rr };
+    const actualRR = parseFloat(((tp2 - entry) / riskDistance).toFixed(2));
+    return { tp1, tp2, tp3, sl, rr: actualRR };
   } else {
     const atrSl = entry + atr * p.sl;
-    const structureSl = swingHigh > 0 ? swingHigh * 1.002 : atrSl; // Sedikit di atas swing high
-    const sl = Math.min(resistance, Math.min(atrSl, structureSl)); // Pilih yang paling dekat (tight)
-    const riskDistance = Math.max(sl - entry, atr * 0.3);
+    const structureSl = swingHigh > 0 ? swingHigh * 1.003 : atrSl;
+    const sl = Math.min(resistance, Math.min(atrSl, structureSl));
+    const riskDistance = Math.max(sl - entry, atr * 0.4);
     const tp1 = entry - riskDistance * p.tp1;
     const tp2 = entry - riskDistance * p.tp2;
     const tp3 = entry - riskDistance * p.tp3;
-    return { tp1, tp2, tp3, sl, rr: p.rr };
+    const actualRR = parseFloat(((entry - tp2) / riskDistance).toFixed(2));
+    return { tp1, tp2, tp3, sl, rr: actualRR };
   }
 }
 
@@ -1639,10 +1683,17 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
     if (plusDI > minusDI) score += 1;
     else score -= 1;
   } else if (adx < 20) {
-    // Sideways market - avoid trend followers, reduce scores drastically
-    score = score * 0.6; // Slightly more generous than 0.5 
+    // Sideways market — drastis kurangi score agar tidak entry di chop
+    score = score * 0.35;
     sidewaysPenalty = true;
-    reasons.push(`Weak trend (ADX: ${adx})`);
+    reasons.push(`⚠️ Weak trend / Sideways (ADX: ${adx})`);
+  }
+
+  // 🛑 BB Width Hard Skip: pasar terlalu sempit = guaranteed whipsaw
+  if (bb.width < 2.5) {
+    score = score * 0.3;
+    sidewaysPenalty = true;
+    reasons.push(`⚠️ BB Width terlalu sempit (${bb.width}% < 2.5%)`);
   }
 
   // ⭐ PHASE 3: RELATIVE STRENGTH VS BTC (Worth It Detection)
@@ -1762,7 +1813,7 @@ function generateSignal(indicators, price, fundingRate, interval = '1h', customF
 
   // Cap confidence if sideways trend is detected to prevent auto-trading
   if (sidewaysPenalty) {
-    confidence = Math.min(confidence, 75);
+    confidence = Math.min(confidence, 60); // Hard cap jauh lebih rendah
   }
 
   // Hard Cap confidence if HTF conflict exists — relaxed in scalp mode
@@ -2211,6 +2262,20 @@ async function runBackgroundScanner() {
 
   console.log(`\n[cron-scan] Memulai pemindaian (${interval}) untuk ${WATCHLIST.length} koin...`);
   
+  // 🛡️ CANDLE-CLOSE CONFIRMATION: hanya entry jika candle hampir selesai
+  // Mencegah entry prematur di mid-candle yang sering reversal
+  const now = Date.now();
+  const intervalMsMap = { '1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000 };
+  const tf = intervalMsMap[interval] || 900000;
+  const candleProgress = ((now % tf) / tf) * 100;
+  const MIN_CANDLE_PROGRESS = 75; // Hanya entry jika candle sudah 75%+ complete
+  
+  if (candleProgress < MIN_CANDLE_PROGRESS) {
+    console.log(`[cron-scan] Skip scan: candle baru ${candleProgress.toFixed(0)}% selesai (min: ${MIN_CANDLE_PROGRESS}%). Menunggu konfirmasi close.`);
+    return;
+  }
+  console.log(`[cron-scan] Candle progress: ${candleProgress.toFixed(0)}% ✅ (threshold: ${MIN_CANDLE_PROGRESS}%)`);
+  
   // 🔥 MASTER FILTER: Ambil sentimen pasar BTC (5m)
   const btcStatus = await getBTCStatus();
   console.log(`[market-watch] Sentimen BTC: ${btcStatus.isBullish ? 'BULLISH ✅' : 'BEARISH ⚠️'} | Price: $${btcStatus.price.toFixed(1)}`);
@@ -2530,7 +2595,7 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
     }
   }
 
-  // 4. TP1 (Memicu Partial TP 50% & SL Break-Even)
+  // 4. TP1 (Memicu Partial TP 30% & SL Break-Even)
   if (!trade.hitTp1) {
     const hitTp1 = isLong ? (currentPrice >= trade.tp1) : (currentPrice <= trade.tp1);
     if (hitTp1) {
@@ -2539,9 +2604,10 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
         changed = true;
         
         if (!trade.isPartiallyClosed && process.env.TRADING_ENABLED === 'true') {
-           const qtyToClose = trade.initialQty ? (trade.initialQty / 2).toFixed(trade.precision?.quantity || 3) : null;
+           // FIX: 30% close (bukan 50%) agar lebih banyak posisi ride ke TP2/TP3
+           const qtyToClose = trade.initialQty ? (trade.initialQty * 0.3).toFixed(trade.precision?.quantity || 3) : null;
            
-           console.log(`[trade] Menjalankan Partial TP 50% untuk ${sym}...`);
+           console.log(`[trade] Menjalankan Partial TP 30% untuk ${sym}...`);
            const success = await closePartialPosition(sym, qtyToClose, trade.type);
            
            if (success) {
@@ -2553,9 +2619,9 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
               if (beSuccess) trade.sl = finalBePrice;
               
               changed = true;
-              await sendTelegramMessage(`💰 *TP1 HIT & PROFIT SECURED: ${sym}* 💰\n\n- 50% posisi ditutup di profit.\n- Stop Loss sisa posisi digeser ke Break-Even (${finalBePrice}).\n\nTrade ini sekarang *Bebas Risiko (Risk-Free)!* 🚀`);
+              await sendTelegramMessage(`💰 *TP1 HIT & PROFIT SECURED: ${sym}* 💰\n\n- 30% posisi ditutup di profit.\n- Stop Loss sisa posisi digeser ke Break-Even (${finalBePrice}).\n\nTrade ini sekarang *Bebas Risiko (Risk-Free)!* 🚀`);
            } else {
-              await sendTelegramMessage(`⚠️ *TP1 HIT - Gagal Partial Close: ${sym}* ⚠️\n\nDeteksi harga TP1 tercapai namun eksekusi penutupan 50% gagal di Binance. Mohon cek manual.`);
+              await sendTelegramMessage(`⚠️ *TP1 HIT - Gagal Partial Close: ${sym}* ⚠️\n\nDeteksi harga TP1 tercapai namun eksekusi penutupan 30% gagal di Binance. Mohon cek manual.`);
            }
         } else {
            await sendTelegramMessage(`✅ *TARGET TP1 HIT: ${sym}* ✅\n\nPrice: ${currentPrice}\nPnL: ${pnlStr}`);
@@ -2564,35 +2630,38 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
     }
   }
 
-  // --- 🔥 AGGRESSIVE SCALPING TRAILING SL ---
-  // BE trigger: profit >= $0.3 → kunci ke entry
-  // Trailing: profit >= $0.5 → trailing offset $0.2 (geser setiap naik $0.2)
+  // --- 🔥 PERCENTAGE-BASED TRAILING SL ---
+  // Lebih adaptif dari fixed dollar: setiap koin punya volatilitas beda
+  // BE trigger: profit >= 0.15% (setelah leverage = 3% move) → kunci ke entry
+  // Trailing: profit >= 0.35% → trailing offset 0.15% di bawah profit running
   if (process.env.TRADING_ENABLED === 'true') {
       const margin = trade.margin || parseFloat(process.env.TRADE_QUANTITY_USDT) || 10;
-      const leverage = trade.leverage || parseInt(process.env.DEFAULT_LEVERAGE) || 20;
+      const leverage = trade.leverage || parseInt(process.env.DEFAULT_LEVERAGE) || 10;
       const posValue = margin * leverage;
       
-      const pnlUsdt = isLong 
-        ? ((currentPrice - trade.entry) / trade.entry) * posValue 
-        : ((trade.entry - currentPrice) / trade.entry) * posValue;
+      // Hitung PnL dalam persentase harga (bukan dollar)
+      const pnlPct = isLong 
+        ? ((currentPrice - trade.entry) / trade.entry) * 100 
+        : ((trade.entry - currentPrice) / trade.entry) * 100;
       
-      // Scalping params: BE trigger ketat, trailing offset kecil
-      const beTrigger = 0.35;    // Kunci BE saat profit $0.35 (15m: sedikit lebih longgar)
-      const trailStart = 0.60;   // Mulai trailing saat profit $0.60
-      const trailOffset = 0.25;  // Jarak trailing $0.25 di bawah profit running
+      // Persentase-based params (adaptif ke semua koin)
+      const bePct = 0.15;         // BE lock saat profit >= 0.15% price move
+      const trailStartPct = 0.35; // Mulai trailing saat profit >= 0.35%
+      const trailOffsetPct = 0.15; // Trailing offset 0.15% di bawah high
       
       let newSlPriceRaw = null;
 
-      // KONDISI A: Profit >= $0.30 tapi < $0.50 → kunci ke Break-Even (entry + fee buffer)
-      if (pnlUsdt >= beTrigger && pnlUsdt < trailStart) {
-          const bePrice = isLong ? trade.entry * 1.0005 : trade.entry * 0.9995;
+      // KONDISI A: Profit >= 0.15% tapi < 0.35% → kunci ke Break-Even
+      if (pnlPct >= bePct && pnlPct < trailStartPct) {
+          const bePrice = isLong ? trade.entry * 1.0003 : trade.entry * 0.9997; // Tiny buffer untuk fee
           newSlPriceRaw = bePrice;
       } 
-      // KONDISI B: Profit >= $0.50 → Trailing Offset ($0.20 di bawah harga running)
-      else if (pnlUsdt >= trailStart) {
-          const targetProfitUsdt = pnlUsdt - trailOffset;
-          const priceDiff = (targetProfitUsdt / posValue) * trade.entry;
-          newSlPriceRaw = isLong ? trade.entry + priceDiff : trade.entry - priceDiff;
+      // KONDISI B: Profit >= 0.35% → Trailing
+      else if (pnlPct >= trailStartPct) {
+          const lockPct = pnlPct - trailOffsetPct;
+          newSlPriceRaw = isLong 
+            ? trade.entry * (1 + lockPct / 100)
+            : trade.entry * (1 - lockPct / 100);
       }
 
       if (newSlPriceRaw !== null) {
@@ -2602,21 +2671,22 @@ async function checkTradeLevels(sym, currentPrice, livePrices) {
           const currentSl = trade.sl || (isLong ? 0 : 999999);
           const isBetter = isLong ? (newSlPrice > currentSl) : (newSlPrice < currentSl);
 
-          // Toleransi minimal $0.03 agar tidak terlalu sering hit API
-          const profitDiff = Math.abs(newSlPrice - currentSl) * (posValue / trade.entry);
+          // Toleransi minimal 0.03% agar tidak terlalu sering hit API
+          const slMovePct = Math.abs((newSlPrice - currentSl) / trade.entry) * 100;
           
-          if (isBetter && profitDiff > 0.03) {
-              const lockedProfit = Math.max(0, pnlUsdt - trailOffset).toFixed(2);
-              console.log(`[trailing-sl] ${sym} PnL=$${pnlUsdt.toFixed(2)} | SL → $${newSlPrice} (Lock: ~$${lockedProfit})`);
+          if (isBetter && slMovePct > 0.03) {
+              const lockedPct = Math.max(0, pnlPct - trailOffsetPct).toFixed(2);
+              console.log(`[trailing-sl] ${sym} PnL=${pnlPct.toFixed(3)}% | SL → $${newSlPrice} (Lock: ~${lockedPct}%)`);
               
               const beSuccess = await moveStopLossToBreakEven(sym, null, trade.type, newSlPrice);
               if (beSuccess) {
                   trade.sl = newSlPrice;
                   changed = true;
                   // Notif Telegram hanya saat pertama kali BE aktif atau profit signifikan
-                  if (!trade._beNotified || pnlUsdt >= 1.0) {
+                  if (!trade._beNotified || pnlPct >= 0.5) {
                     trade._beNotified = true;
-                    await sendTelegramMessage(`🛡️ *TRAILING SL: ${sym}* 🛡️\n\nProfit: $${pnlUsdt.toFixed(2)}\nSL Baru: $${newSlPrice}\nProfit Terkunci: ~$${lockedProfit}`);
+                    const pnlUsdt = (pnlPct / 100) * posValue;
+                    await sendTelegramMessage(`🛡️ *TRAILING SL: ${sym}* 🛡️\n\nProfit: ${pnlPct.toFixed(2)}% ($${pnlUsdt.toFixed(2)})\nSL Baru: $${newSlPrice}\nProfit Terkunci: ~${lockedPct}%`);
                   }
               }
           }
